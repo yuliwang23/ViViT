@@ -10,7 +10,7 @@ constexpr int SEQ_LEN = 14*14 + 1; // 14*14*16 --> per frame // 14*15
 constexpr int EMBED_DIM = 768;
 constexpr int NUM_HEADS = 12;
 constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS;
-
+ 
 void linear_qkv_multihead(
     int X[SEQ_LEN][EMBED_DIM],
     int Wq[EMBED_DIM][EMBED_DIM],
