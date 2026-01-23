@@ -1,0 +1,6 @@
+# Ignore Vitis HLS project synthesis/simulation output
+**/solution1/
+**/.autopilot/
+**/db/
+*.log
+*.rpt

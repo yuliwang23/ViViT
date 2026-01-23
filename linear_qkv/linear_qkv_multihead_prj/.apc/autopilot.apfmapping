@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<autopilotfilemapping:AutoPilotFileMapping xmlns:autopilotfilemapping="www.autoesl.com/autopilotfilemapping">
+  <source>
+    <originFiles name="linear_qkv_multihead.cpp" path="D:\vivit\HLS\linear_qkv\linear_qkv_multihead.cpp"/>
+  </source>
+  <testbench>
+    <originFiles name="linear_qkv_multihead_test.cpp" path="D:\vivit\HLS\linear_qkv\linear_qkv_multihead_test.cpp"/>
+  </testbench>
+</autopilotfilemapping:AutoPilotFileMapping>
