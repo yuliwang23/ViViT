@@ -1,9 +1,13 @@
-# Ignore Vitis HLS project synthesis/simulation output
-**/solution1/
+**/solution*/
+
+**/.apc/
+**/.settings/
 **/.autopilot/
-**/db/
+.cproject
+.project
+hls.app
+*.xml
 *.log
 *.jou
+
 *.exe
-*.o
-*.obj
