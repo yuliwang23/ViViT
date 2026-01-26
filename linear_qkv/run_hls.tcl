@@ -63,7 +63,7 @@ open_solution -reset solution1
 # Specify a Xilinx device and clock period
 # - Do not specify a clock uncertainty (margin)
 # - Let the  margin to default to 12.5% of clock period
-set_part  {xcvu9p-flgb2104-1-e}
+set_part  {xcvu37p-fsvh2892-2L-e}
 create_clock -period "75MHz"
 #set_clock_uncertainty 1.25
 

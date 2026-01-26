@@ -11,14 +11,24 @@ void load_X_and_Bias(
    int bv[EMBED_DIM],
    int buffer_bv[EMBED_DIM])
 {
+
 load_X_row:
    for (int i = 0; i < SEQ_LEN; i++){
+      uint512_dt *X_512 = (uint512_dt*)X;
    load_X_col:
-      for (int j = 0; j < EMBED_DIM; j++){
+      for (int j = 0; j < EMBED_DIM/16; j++){
       #pragma HLS PIPELINE II=1
-         buffer_X[i][j] = X[i][j];
+         uint512_dt temp_chunk = X_512[i * (EMBED_DIM / 16) + j];
+         loop_unpack:
+            for(int k = 0; k < 16; k++) {
+            #pragma HLS UNROLL 
+               int start_bit = k * 32;
+               int end_bit = start_bit + 31;
+               buffer_X[i][j*16+k] = temp_chunk.range(end_bit, start_bit);
+            }
       }
    }
+
 load_Bias_Q_loop:
    for(int i = 0; i < EMBED_DIM; i++) {
    #pragma HLS PIPELINE II=1
@@ -40,12 +50,20 @@ void load_Weight_Q(
    int Wq[EMBED_DIM][EMBED_DIM],
    int buffer_Wq[EMBED_DIM][EMBED_DIM])
 {
+uint512_dt *Wq_512 = (uint512_dt*)Wq;
 load_Weight_Q_row:
-   for (int i = 0; i < EMBED_DIM; i++) {
+   for (int j = 0; j < EMBED_DIM; j++) {
    load_Weight_Q_col:
-      for (int j = 0; j < EMBED_DIM; j++) {
+      for (int i = 0; i < EMBED_DIM / 16; i++) {
       #pragma HLS PIPELINE II=1
-         buffer_Wq[i][j] = Wq[i][j];
+      uint512_dt temp_chunk = Wq_512[j * (EMBED_DIM / 16) + i];
+      loop_unpack:
+        for(int k = 0; k < 16; k++) {
+            #pragma HLS UNROLL 
+            int start_bit = k * 32;
+            int end_bit = start_bit + 31;
+            buffer_Wq[i*16+k][j] = temp_chunk.range(end_bit, start_bit);
+        }
       }
    }
 }
@@ -54,12 +72,20 @@ void load_Weight_K(
    int Wk[EMBED_DIM][EMBED_DIM],
    int buffer_Wk[EMBED_DIM][EMBED_DIM])
 {
+uint512_dt *Wk_512 = (uint512_dt*)Wk;
 load_Weight_K_row:
-   for (int i = 0; i < EMBED_DIM; i++) {
+   for (int j = 0; j < EMBED_DIM; j++) {
    load_Weight_K_col:
-      for (int j = 0; j < EMBED_DIM; j++) {
+      for (int i = 0; i < EMBED_DIM / 16; i++) {
       #pragma HLS PIPELINE II=1
-         buffer_Wk[i][j] = Wk[i][j];
+      uint512_dt temp_chunk = Wk_512[j * (EMBED_DIM / 16) + i];
+      loop_unpack:
+        for(int k = 0; k < 16; k++) {
+            #pragma HLS UNROLL 
+            int start_bit = k * 32;
+            int end_bit = start_bit + 31;
+            buffer_Wk[i*16+k][j] = temp_chunk.range(end_bit, start_bit);
+        }
       }
    }
 }
@@ -68,15 +94,51 @@ void load_Weight_V(
    int Wv[EMBED_DIM][EMBED_DIM],
    int buffer_Wv[EMBED_DIM][EMBED_DIM])
 {
+uint512_dt *Wv_512 = (uint512_dt*)Wv;
 load_Weight_V_row:
-   for (int i = 0; i < EMBED_DIM; i++) {
+   for (int j = 0; j < EMBED_DIM; j++) {
    load_Weight_V_col:
-      for (int j = 0; j < EMBED_DIM; j++) {
+      for (int i = 0; i < EMBED_DIM / 16; i++) {
       #pragma HLS PIPELINE II=1
-         buffer_Wv[i][j] = Wv[i][j];
+      uint512_dt temp_chunk = Wv_512[j * (EMBED_DIM / 16) + i];
+      loop_unpack:
+        for(int k = 0; k < 16; k++) {
+            #pragma HLS UNROLL 
+            int start_bit = k * 32;
+            int end_bit = start_bit + 31;
+            buffer_Wv[i*16+k][j] = temp_chunk.range(end_bit, start_bit);
+        }
       }
    }
 }
+
+// void load_Weight_K(
+//    int Wk[EMBED_DIM][EMBED_DIM],
+//    int buffer_Wk[EMBED_DIM][EMBED_DIM])
+// {
+// load_Weight_K_row:
+//    for (int i = 0; i < EMBED_DIM; i++) {
+//    load_Weight_K_col:
+//       for (int j = 0; j < EMBED_DIM; j++) {
+//       #pragma HLS PIPELINE II=1
+//          buffer_Wk[i][j] = Wk[i][j];
+//       }
+//    }
+// }
+
+// void load_Weight_V(
+//    int Wv[EMBED_DIM][EMBED_DIM],
+//    int buffer_Wv[EMBED_DIM][EMBED_DIM])
+// {
+// load_Weight_V_row:
+//    for (int i = 0; i < EMBED_DIM; i++) {
+//    load_Weight_V_col:
+//       for (int j = 0; j < EMBED_DIM; j++) {
+//       #pragma HLS PIPELINE II=1
+//          buffer_Wv[i][j] = Wv[i][j];
+//       }
+//    }
+// }
 
 void load_data_linear_qkv_multihead(
    int X[SEQ_LEN][EMBED_DIM],
@@ -121,16 +183,42 @@ load_Weight_V(
 );
 }
 
+load_X_row:
+   for (int i = 0; i < SEQ_LEN; i++){
+      uint512_dt *X_512 = (uint512_dt*)X;
+   load_X_col:
+      for (int j = 0; j < EMBED_DIM/16; j++){
+      #pragma HLS PIPELINE II=1
+         uint512_dt temp_chunk = X_512[i * (EMBED_DIM / 16) + j];
+         loop_unpack:
+            for(int k = 0; k < 16; k++) {
+            #pragma HLS UNROLL 
+               int start_bit = k * 32;
+               int end_bit = start_bit + 31;
+               buffer_X[i][j*16+k] = temp_chunk.range(end_bit, start_bit);
+            }
+      }
+   }
+
+
 void store_Q(
    int buffer_Q[NUM_HEADS][SEQ_LEN][HEAD_DIM],
    int Q[NUM_HEADS][SEQ_LEN][HEAD_DIM]
 ){
+uint512_dt *Q_512 = (uint512_dt*)Q;
 store_Q_loop:
    for (int h = 0; h < NUM_HEADS; h++) {
       for (int i = 0; i < SEQ_LEN; i++) {
-         for (int d = 0; d < HEAD_DIM; d++) {
-            #pragma HLS PIPELINE II=1
-            Q[h][i][d] = buffer_Q[h][i][d];
+         for (int d = 0; d < HEAD_DIM/16; d++) {
+         #pragma HLS PIPELINE II=1
+            uint512_dt temp_chunk = Q_512[h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d];
+            loop_pack:
+               for(int k = 0; k < 16; k++) {
+               #pragma HLS UNROLL
+                  int start_bit = k * 32;
+                  int end_bit = start_bit + 31;
+                  Q[h][i][d*16+k] = temp_chunk.range(end_bit, start_bit);
+               }
          }
       }
    }
@@ -140,12 +228,20 @@ void store_K(
    int buffer_K[NUM_HEADS][SEQ_LEN][HEAD_DIM],
    int K[NUM_HEADS][SEQ_LEN][HEAD_DIM]
 ){
+uint512_dt *K_512 = (uint512_dt*)K;
 store_K_loop:
    for (int h = 0; h < NUM_HEADS; h++) {
       for (int i = 0; i < SEQ_LEN; i++) {
-         for (int d = 0; d < HEAD_DIM; d++) {
-            #pragma HLS PIPELINE II=1
-            K[h][i][d] = buffer_K[h][i][d];
+         for (int d = 0; d < HEAD_DIM/16; d++) {
+         #pragma HLS PIPELINE II=1
+            uint512_dt temp_chunk = K_512[h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d];
+            loop_pack:
+               for(int k = 0; k < 16; k++) {
+               #pragma HLS UNROLL
+                  int start_bit = k * 32;
+                  int end_bit = start_bit + 31;
+                  K[h][i][d*16+k] = temp_chunk.range(end_bit, start_bit);
+               }
          }
       }
    }
@@ -155,16 +251,54 @@ void store_V(
    int buffer_V[NUM_HEADS][SEQ_LEN][HEAD_DIM],
    int V[NUM_HEADS][SEQ_LEN][HEAD_DIM]
 ){
+uint512_dt *V_512 = (uint512_dt*)V;
 store_V_loop:
    for (int h = 0; h < NUM_HEADS; h++) {
       for (int i = 0; i < SEQ_LEN; i++) {
-         for (int d = 0; d < HEAD_DIM; d++) {
-            #pragma HLS PIPELINE II=1
-            V[h][i][d] = buffer_V[h][i][d];
+         for (int d = 0; d < HEAD_DIM/16; d++) {
+         #pragma HLS PIPELINE II=1
+            uint512_dt temp_chunk = V_512[h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d];
+            loop_pack:
+               for(int k = 0; k < 16; k++) {
+               #pragma HLS UNROLL
+                  int start_bit = k * 32;
+                  int end_bit = start_bit + 31;
+                  V[h][i][d*16+k] = temp_chunk.range(end_bit, start_bit);
+               }
          }
       }
    }
 }
+
+// void store_K(
+//    int buffer_K[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+//    int K[NUM_HEADS][SEQ_LEN][HEAD_DIM]
+// ){
+// store_K_loop:
+//    for (int h = 0; h < NUM_HEADS; h++) {
+//       for (int i = 0; i < SEQ_LEN; i++) {
+//          for (int d = 0; d < HEAD_DIM; d++) {
+//             #pragma HLS PIPELINE II=1
+//             K[h][i][d] = buffer_K[h][i][d];
+//          }
+//       }
+//    }
+// }
+
+// void store_V(
+//    int buffer_V[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+//    int V[NUM_HEADS][SEQ_LEN][HEAD_DIM]
+// ){
+// store_V_loop:
+//    for (int h = 0; h < NUM_HEADS; h++) {
+//       for (int i = 0; i < SEQ_LEN; i++) {
+//          for (int d = 0; d < HEAD_DIM; d++) {
+//             #pragma HLS PIPELINE II=1
+//             V[h][i][d] = buffer_V[h][i][d];
+//          }
+//       }
+//    }
+// }
 
 void store_data_linear_qkv_multihead(
    int buffer_Q[NUM_HEADS][SEQ_LEN][HEAD_DIM],
@@ -259,16 +393,16 @@ static int buffer_V[NUM_HEADS][SEQ_LEN][HEAD_DIM];
 // gmem interface 1: Wq, Q = 768*768+12*197*64=611584
 // gmem interface 2: Wk, K = 768*768+12*197*64=611584
 // gmem interface 3: Wv, V = 768*768+12*197*64=611584
-#pragma HLS INTERFACE m_axi port=X offset=slave bundle=gmem0
-#pragma HLS INTERFACE m_axi port=Wq offset=slave bundle=gmem1
-#pragma HLS INTERFACE m_axi port=Wk offset=slave bundle=gmem2
-#pragma HLS INTERFACE m_axi port=Wv offset=slave bundle=gmem3
-#pragma HLS INTERFACE m_axi port=bq offset=slave bundle=gmem0
-#pragma HLS INTERFACE m_axi port=bk offset=slave bundle=gmem0
-#pragma HLS INTERFACE m_axi port=bv offset=slave bundle=gmem0
-#pragma HLS INTERFACE m_axi port=Q offset=slave bundle=gmem1
-#pragma HLS INTERFACE m_axi port=K offset=slave bundle=gmem2
-#pragma HLS INTERFACE m_axi port=V offset=slave bundle=gmem3
+#pragma HLS INTERFACE m_axi port=X offset=slave bundle=gmem0 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=Wq offset=slave bundle=gmem1 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=Wk offset=slave bundle=gmem2 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=Wv offset=slave bundle=gmem3 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=bq offset=slave bundle=gmem0 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=bk offset=slave bundle=gmem0 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=bv offset=slave bundle=gmem0 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=Q offset=slave bundle=gmem1 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=K offset=slave bundle=gmem2 max_widen_bitwidth=512
+#pragma HLS INTERFACE m_axi port=V offset=slave bundle=gmem3 max_widen_bitwidth=512
 // control interface
 #pragma HLS INTERFACE s_axilite port=X bundle=control
 #pragma HLS INTERFACE s_axilite port=Wq bundle=control

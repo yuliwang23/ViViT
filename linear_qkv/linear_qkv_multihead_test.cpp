@@ -45,8 +45,11 @@ void linear_qkv_naive(
 int main() {
     static int X[SEQ_LEN][EMBED_DIM];
     static int Wq[EMBED_DIM][EMBED_DIM];
+    static int WTq[EMBED_DIM][EMBED_DIM];
     static int Wk[EMBED_DIM][EMBED_DIM];
+    static int WTk[EMBED_DIM][EMBED_DIM];
     static int Wv[EMBED_DIM][EMBED_DIM];
+    static int WTv[EMBED_DIM][EMBED_DIM];
     static int bq[EMBED_DIM], bk[EMBED_DIM], bv[EMBED_DIM];
 
     static int Q_ref[NUM_HEADS][SEQ_LEN][HEAD_DIM];
@@ -71,9 +74,26 @@ int main() {
             Wv[j][i] = ((float)rand()/RAND_MAX - 0.5f);
         }
     }
+    for (int i=0;i<EMBED_DIM;i++) {
+        for (int j=0;j<EMBED_DIM;j++) {
+            WTq[i][j] = Wq[j][i];
+        }
+    }
+
+    for (int i=0;i<EMBED_DIM;i++) {
+        for (int j=0;j<EMBED_DIM;j++) {
+            WTk[i][j] = Wk[j][i];
+        }
+    }
+
+    for (int i=0;i<EMBED_DIM;i++) {
+        for (int j=0;j<EMBED_DIM;j++) {
+            WTv[i][j] = Wv[j][i];
+        }
+    }
 
     linear_qkv_naive(X,Wq,bq,Wk,bk,Wv,bv,Q_ref,K_ref,V_ref);
-    linear_qkv_multihead(X,Wq,bq,Wk,bk,Wv,bv,Q_opt,K_opt,V_opt);
+    linear_qkv_multihead(X,WTq,bq,WTk,bk,WTv,bv,Q_opt,K_opt,V_opt);
 
 int max_err = 0;
 
