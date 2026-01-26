@@ -182,43 +182,29 @@ load_Weight_V(
    buffer_Wv
 );
 }
-
-load_X_row:
-   for (int i = 0; i < SEQ_LEN; i++){
-      uint512_dt *X_512 = (uint512_dt*)X;
-   load_X_col:
-      for (int j = 0; j < EMBED_DIM/16; j++){
-      #pragma HLS PIPELINE II=1
-         uint512_dt temp_chunk = X_512[i * (EMBED_DIM / 16) + j];
-         loop_unpack:
-            for(int k = 0; k < 16; k++) {
-            #pragma HLS UNROLL 
-               int start_bit = k * 32;
-               int end_bit = start_bit + 31;
-               buffer_X[i][j*16+k] = temp_chunk.range(end_bit, start_bit);
-            }
-      }
-   }
-
-
 void store_Q(
    int buffer_Q[NUM_HEADS][SEQ_LEN][HEAD_DIM],
    int Q[NUM_HEADS][SEQ_LEN][HEAD_DIM]
 ){
-uint512_dt *Q_512 = (uint512_dt*)Q;
-store_Q_loop:
+   uint512_dt *Q_512_ptr = (uint512_dt*)Q;
+   store_Q_loop_Head:
    for (int h = 0; h < NUM_HEADS; h++) {
+      store_Q_loop_Seq:
       for (int i = 0; i < SEQ_LEN; i++) {
+         store_Q_loop_Dim:
          for (int d = 0; d < HEAD_DIM/16; d++) {
          #pragma HLS PIPELINE II=1
-            uint512_dt temp_chunk = Q_512[h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d];
-            loop_pack:
+               uint512_dt temp_chunk;
+               loop_pack:
                for(int k = 0; k < 16; k++) {
                #pragma HLS UNROLL
+                  int val = buffer_Q[h][i][d*16 + k];
                   int start_bit = k * 32;
                   int end_bit = start_bit + 31;
-                  Q[h][i][d*16+k] = temp_chunk.range(end_bit, start_bit);
+                  temp_chunk.range(end_bit, start_bit) = val;
                }
+               int global_idx = h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d;
+               Q_512_ptr[global_idx] = temp_chunk;
          }
       }
    }
@@ -228,20 +214,25 @@ void store_K(
    int buffer_K[NUM_HEADS][SEQ_LEN][HEAD_DIM],
    int K[NUM_HEADS][SEQ_LEN][HEAD_DIM]
 ){
-uint512_dt *K_512 = (uint512_dt*)K;
-store_K_loop:
+   uint512_dt *K_512_ptr = (uint512_dt*)K;
+   store_K_loop_Head:
    for (int h = 0; h < NUM_HEADS; h++) {
+      store_K_loop_Seq:
       for (int i = 0; i < SEQ_LEN; i++) {
+         store_K_loop_Dim:
          for (int d = 0; d < HEAD_DIM/16; d++) {
          #pragma HLS PIPELINE II=1
-            uint512_dt temp_chunk = K_512[h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d];
-            loop_pack:
+               uint512_dt temp_chunk;
+               loop_pack:
                for(int k = 0; k < 16; k++) {
                #pragma HLS UNROLL
+                  int val = buffer_K[h][i][d*16 + k];
                   int start_bit = k * 32;
                   int end_bit = start_bit + 31;
-                  K[h][i][d*16+k] = temp_chunk.range(end_bit, start_bit);
+                  temp_chunk.range(end_bit, start_bit) = val;
                }
+               int global_idx = h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d;
+               K_512_ptr[global_idx] = temp_chunk;
          }
       }
    }
@@ -251,20 +242,25 @@ void store_V(
    int buffer_V[NUM_HEADS][SEQ_LEN][HEAD_DIM],
    int V[NUM_HEADS][SEQ_LEN][HEAD_DIM]
 ){
-uint512_dt *V_512 = (uint512_dt*)V;
-store_V_loop:
+   uint512_dt *V_512_ptr = (uint512_dt*)V;
+   store_V_loop_Head:
    for (int h = 0; h < NUM_HEADS; h++) {
+      store_V_loop_Seq:
       for (int i = 0; i < SEQ_LEN; i++) {
+         store_V_loop_Dim:
          for (int d = 0; d < HEAD_DIM/16; d++) {
          #pragma HLS PIPELINE II=1
-            uint512_dt temp_chunk = V_512[h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d];
-            loop_pack:
+               uint512_dt temp_chunk;
+               loop_pack:
                for(int k = 0; k < 16; k++) {
                #pragma HLS UNROLL
+                  int val = buffer_V[h][i][d*16 + k];
                   int start_bit = k * 32;
                   int end_bit = start_bit + 31;
-                  V[h][i][d*16+k] = temp_chunk.range(end_bit, start_bit);
+                  temp_chunk.range(end_bit, start_bit) = val;
                }
+               int global_idx = h * (SEQ_LEN * HEAD_DIM / 16) + i * (HEAD_DIM / 16) + d;
+               V_512_ptr[global_idx] = temp_chunk;
          }
       }
    }
@@ -324,6 +320,27 @@ store_V(
 );
 }
 
+void compute_EMBED(
+   int i,
+   int buffer_X[SEQ_LEN][EMBED_DIM],
+   int buffer_Wq[EMBED_DIM][EMBED_DIM],
+   int buffer_Wk[EMBED_DIM][EMBED_DIM],
+   int buffer_Wv[EMBED_DIM][EMBED_DIM],
+   int q,
+   int k,
+   int v,
+   int col
+){
+   for (int e = 0; e < EMBED_DIM; e++)
+   {
+      #pragma HLS UNROLL factor=64
+      #pragma HLS PIPELINE II=1
+      q += buffer_X[i][e] * buffer_Wq[e][col];
+      k += buffer_X[i][e] * buffer_Wk[e][col];
+      v += buffer_X[i][e] * buffer_Wv[e][col];
+   }
+}
+
 void compute_linear_qkv_multihead(
    int buffer_X[SEQ_LEN][EMBED_DIM],
    int buffer_Wq[EMBED_DIM][EMBED_DIM],
@@ -348,14 +365,17 @@ void compute_linear_qkv_multihead(
             {
                int q = 0, k = 0, v = 0;
                int col = h * HEAD_DIM + d;
-               EMBED:
-               for (int e = 0; e < EMBED_DIM; e++)
-               {
-                  #pragma HLS UNROLL factor=64
-                  q += buffer_X[i][e] * buffer_Wq[e][col];
-                  k += buffer_X[i][e] * buffer_Wk[e][col];
-                  v += buffer_X[i][e] * buffer_Wv[e][col];
-               }
+               compute_EMBED(
+                  i,
+                  buffer_X,
+                  buffer_Wq,
+                  buffer_Wk,
+                  buffer_Wv,
+                  q,
+                  k,
+                  v,
+                  col
+               );
                buffer_Q[h][i][d] = q + buffer_bq[col];
                buffer_K[h][i][d] = k + buffer_bk[col];
                buffer_V[h][i][d] = v + buffer_bv[col];
@@ -463,3 +483,5 @@ store_data_linear_qkv_multihead(
    V
 );
 }
+
+
