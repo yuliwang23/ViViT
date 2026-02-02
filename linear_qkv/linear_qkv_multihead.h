@@ -19,6 +19,7 @@ constexpr int tile_sql_remain = SEQ_LEN % tile_size_sql;
 constexpr int DSP_PER_CYCLE = 16;
 typedef ap_uint<256> uint256_dt;
  
+extern "C"{
 void linear_qkv_multihead(
     int X[SEQ_LEN][EMBED_DIM],
     int Wq[EMBED_DIM][EMBED_DIM],
@@ -43,6 +44,7 @@ void load_Weight_Q_tile_HBM2FIFO(
     int row_offset, // tile start row (in HBM)
     int col_offset  // tile start col (in HBM)
 );
+}
 
 void load_Weight_Q_tile_FIFO2BRAM(
     hls::stream<uint256_dt> &FIFO_Wq,
