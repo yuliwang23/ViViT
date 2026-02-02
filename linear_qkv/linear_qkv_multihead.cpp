@@ -476,13 +476,13 @@ loop_in_tile:
                int p_sum_q = 0;
                int p_sum_k = 0;
                int p_sum_v = 0;
+               #pragma HLS PIPELINE II=4
                compute_dot:
                for (int k = 0; k < TILE_SIZE; k += 16) {
                   int reg_X[16];
                   int reg_Wq[16];
                   int reg_Wk[16];
                   int reg_Wv[16];
-                  #pragma HLS PIPELINE II=1
                   #pragma HLS ARRAY_PARTITION variable=reg_X  type=complete
                   #pragma HLS ARRAY_PARTITION variable=reg_Wq type=complete
                   #pragma HLS ARRAY_PARTITION variable=reg_Wk type=complete
