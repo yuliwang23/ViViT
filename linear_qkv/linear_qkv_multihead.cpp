@@ -1,4 +1,6 @@
 #include "linear_qkv_multihead.h"
+
+extern "C"{
 void linear_qkv_multihead(
     int X[SEQ_LEN][EMBED_DIM],
     int Wq[EMBED_DIM][EMBED_DIM],
@@ -113,6 +115,7 @@ hls::stream<uint256_dt> FIFO_V;
    store_result_FIFO2HBM(FIFO_K, K);
    store_result_FIFO2HBM(FIFO_V, V);
 
+}
 }
 
 void load_X_HBM2FIFO(
