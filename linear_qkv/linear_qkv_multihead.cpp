@@ -20,9 +20,9 @@ static int BRAM_bq[EMBED_DIM];
 static int BRAM_bk[EMBED_DIM];
 static int BRAM_bv[EMBED_DIM];
 // output buffer declaration
-static int BRAM_Q[SEQ_LEN][HEAD_DIM];
-static int BRAM_K[SEQ_LEN][HEAD_DIM];
-static int BRAM_V[SEQ_LEN][HEAD_DIM];
+// static int BRAM_Q[SEQ_LEN][HEAD_DIM];
+// static int BRAM_K[SEQ_LEN][HEAD_DIM];
+// static int BRAM_V[SEQ_LEN][HEAD_DIM];
 
 // gmem interface 0: X, bq, bk, bv = 197*768+768+768+768=153984
 // gmem interface 1: Wq, Q = 768*768+12*197*64=611584
