@@ -13,10 +13,9 @@
 // ---------------------------------------------------------
 float custom_hls_exp(float x) 
 {
-    // TODO: Replace with your actual hardware-optimized exp function
-    // For demonstration, we just use std::exp with a tiny artificial noise added
-    float hw_result = std::exp(x) + 0.00001f; 
-    return hw_result;
+    float y_out = 0.0f;
+    exp_top(x, &y_out);
+    return y_out;
 }
 
 int main() 
