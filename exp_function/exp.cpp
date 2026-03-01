@@ -15,6 +15,7 @@ void exp_top(float x_in, float *y_out)
 float fast_exp(float x)
 {
     #pragma HLS PIPELINE II=1
+    #pragma HLS INLINE off
 
     float y = x * 1.44269504f;
     int I = (int)y;
