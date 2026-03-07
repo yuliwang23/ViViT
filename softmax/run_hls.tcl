@@ -50,9 +50,11 @@ open_project	-reset softmax_prj
 
 # The source file and test bench
 add_files			softmax.cpp
+add_files           exp.cpp
 add_files -tb	softmax_test.cpp
 # Specify the top-level function for synthesis
 set_top				softmax
+
 
 ###########################
 # Solution settings

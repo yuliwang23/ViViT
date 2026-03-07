@@ -56,12 +56,28 @@ void softmax_sw_golden(float in[VEC_MAX],float out[VEC_MAX])
 // (e.g., the LUT + Interpolation ap_fixed version).
 void softmax_hw_dut(float input[VEC_MAX], float output[VEC_MAX])
 {
-    // TODO: Replace with actual HLS implementation
-    // For demonstration, we simply call the golden model 
-    // and add a tiny artificial noise to simulate hardware precision loss
-    softmax_sw_golden(input, output);
-    for(int i = 0; i < VEC_MAX; i++) {
-        output[i] += 0.000001f; // Artificial noise
+    uint256_dt input_bus[VEC_MAX / 8];
+    uint256_dt output_bus[VEC_MAX / 8];
+
+
+    for (int i = 0; i < VEC_MAX / 8; i++) {
+        uint256_dt chunk;
+        for (int k = 0; k < 8; k++) {
+            float_cast_t converter;
+            converter.f = input[i * 8 + k];
+            chunk.range(k * 32 + 31, k * 32) = converter.i;
+        }
+        input_bus[i] = chunk;
+    }
+
+    softmax(input_bus, output_bus);
+    for (int i = 0; i < VEC_MAX / 8; i++) {
+        uint256_dt chunk = output_bus[i];
+        for (int k = 0; k < 8; k++) {
+            float_cast_t converter;
+            converter.i = chunk.range(k * 32 + 31, k * 32);
+            output[i * 8 + k] = converter.f;
+        }
     }
 }
 
@@ -132,7 +148,7 @@ int main()
     if (max_abs_error <= ERROR_TOLERANCE)
     {
         std::cout << "[SUCCESS] Hardware Validation Passed!" << std::endl;
-        return 0; // Return 0 indicates success in C++ environments
+        return 1; // Return 0 indicates success in C++ environments
     }
     else
     {
