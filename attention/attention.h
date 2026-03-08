@@ -26,4 +26,74 @@ void softmax_software(float in[VEC_MAX],
             float out[VEC_MAX],
             int length);
 
+void load_Q_HBM2FIFO(
+    int Q[SEQ_LEN][HEAD_DIM],
+    hls::stream<uint256_dt> &FIFO_Q);
+
+void load_K_HBM2FIFO(
+    int K[SEQ_LEN][HEAD_DIM],
+    hls::stream<uint256_dt> &FIFO_K);
+
+void load_V_HBM2FIFO(
+    int V[SEQ_LEN][HEAD_DIM],
+    hls::stream<uint256_dt> &FIFO_V);
+
+void load_Q_FIFO2BRAM(
+    hls::stream<uint256_dt> &FIFO_Q,
+    int BRAM_Q[HEAD_DIM]);
+
+void load_K_FIFO2BRAM(
+    hls::stream<uint256_dt> &FIFO_K,
+    int BRAM_K[HEAD_DIM]);
+
+void load_V_FIFO2BRAM(
+    hls::stream<uint256_dt> &FIFO_V,
+    int BRAM_V[HEAD_DIM]);
+
+void compute_score(
+    hls::stream<uint256_dt> &FIFO_Q,
+    hls::stream<uint256_dt> &FIFO_K,
+    hls::stream<float> &FIFO_score);
+
+void load_score_FIFO2BRAM(
+    hls::stream<float> &FIFO_score,
+    float BRAM_score[SEQ_LEN + 11]);
+
+void compute_max(
+    float BRAM_score[SEQ_LEN + 11],
+    float &max_score);
+
+void compute_sum_exp(
+    float BRAM_score[SEQ_LEN + 11],
+    float max_score,
+    float &sum_exp);
+
+void compute_softmax_output(
+    float BRAM_score[SEQ_LEN + 11],
+    float max_score,
+    float sum_exp,
+    hls::stream<float> &FIFO_softmax_out);
+
+void compute_softmax_one_dim(
+    hls::stream<float> &FIFO_score,
+    float BRAM_score[SEQ_LEN + 11],
+    hls::stream<float> &FIFO_softmax_out);
+
+void compute_softmax(
+    hls::stream<float> &FIFO_score,
+    hls::stream<float> &FIFO_softmax_out);
+
+void compute_attention_output(
+    hls::stream<float> &FIFO_softmax_out,
+    hls::stream<uint256_dt> &FIFO_V,
+    hls::stream<uint256_dt> &FIFO_Out);
+
+void store_output_BRAM2FIFO(
+    int BRAM_Out[HEAD_DIM],
+    hls::stream<uint256_dt> &FIFO_Out);
+
+void store_result_FIFO2HBM(
+    hls::stream<uint256_dt> &FIFO_Out,
+    int Out[SEQ_LEN][HEAD_DIM]);
+
 #endif // ATTENTION_H
