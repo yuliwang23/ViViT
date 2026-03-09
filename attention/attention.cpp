@@ -184,15 +184,26 @@ void compute_sum_exp(
     float &sum_exp)
 {
     #pragma HLS INLINE off
+    float sum_temp[8];
+    #pragma HLS ARRAY_PARTITION variable=sum_temp complete
     sum_exp = 0.0f;
+    init_values:
+    for(int j = 0; j < 8; j++) {
+        #pragma HLS PIPELINE II=1
+        sum_temp[j] = 0.0f;
+    }
     compute_sum_exp_loop:
     for (int i = 0; i < SEQ_LEN + 11; i+=8) {
         #pragma HLS PIPELINE II=1
         for(int j = 0; j < 8; j++) {
             #pragma HLS UNROLL factor=8
             float exp_val = hls::exp(BRAM_score[i + j] - max_score);
-            sum_exp += exp_val;
+            sum_temp[j] += exp_val;
         }
+    }
+    for(int j = 0; j < 8; j++) {
+        #pragma HLS PIPELINE II=1
+        sum_exp += sum_temp[j];
     }
     sum_exp -= 11.0f;
 }
@@ -204,16 +215,24 @@ void compute_softmax_output(
     hls::stream<float> &FIFO_softmax_out)
 {
     #pragma HLS INLINE off
+    float softmax_val[SEQ_LEN];
     compute_softmax_output_loop:
     for (int i = 0; i < SEQ_LEN + 11; i+=8) {
         #pragma HLS PIPELINE II=1
+        float exp_vals[8];
+        #pragma HLS ARRAY_PARTITION variable=exp_vals complete
         for(int j = 0; j < 8; j++) {
             #pragma HLS UNROLL factor=8
             if(i + j < SEQ_LEN) {
-                float exp_val = hls::exp(BRAM_score[i + j] - max_score);
-                FIFO_softmax_out.write(exp_val / sum_exp);
+                exp_vals[j] = hls::exp(BRAM_score[i + j] - max_score);
+                softmax_val[i + j] = exp_vals[j] / sum_exp;
             }
         }
+    }
+    compute_softmax_output_write_loop:
+    for (int i = 0; i < SEQ_LEN; i++) {
+        #pragma HLS PIPELINE II=1
+        FIFO_softmax_out.write(softmax_val[i]);
     }
 }
 
@@ -290,12 +309,20 @@ int BRAM_V[HEAD_DIM];
 int BRAM_Out[HEAD_DIM];
 float BRAM_acc_temp[HEAD_DIM];
 float softmax_val;
-#pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=1 factor=8
-#pragma HLS ARRAY_PARTITION variable=BRAM_Out type=cyclic dim=1 factor=8
-#pragma HLS ARRAY_PARTITION variable=BRAM_acc_temp type=cyclic dim=1 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=1 factor=16
+#pragma HLS ARRAY_PARTITION variable=BRAM_Out type=cyclic dim=1 factor=16
+#pragma HLS ARRAY_PARTITION variable=BRAM_acc_temp type=cyclic dim=1 factor=16
 #pragma HLS BIND_STORAGE variable=BRAM_V type=RAM_1P impl=LUTRAM
 #pragma HLS BIND_STORAGE variable=BRAM_Out type=RAM_1P impl=LUTRAM
-#pragma HLS BIND_STORAGE variable=BRAM_acc_temp type=RAM_1P impl=LUTRAM
+#pragma HLS BIND_STORAGE variable=BRAM_acc_temp type=RAM_2P impl=LUTRAM
+    init_acc_loop:
+    for (int i = 0; i < HEAD_DIM; i+=16) {
+        #pragma HLS PIPELINE II=1
+        for(int r = 0; r < 16; r++) {
+            #pragma HLS UNROLL factor=16
+            BRAM_acc_temp[i + r] = 0.0f;
+        }
+    }
     compute_attention_output_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
         for(int j = 0; j < SEQ_LEN; j++){
@@ -315,6 +342,15 @@ float softmax_val;
                 }
             }
         }
+        for(int d = 0; d < HEAD_DIM; d+=16) {
+            #pragma HLS PIPELINE II=1
+            for(int r = 0; r < 16; r++) {
+                #pragma HLS UNROLL factor=16
+                BRAM_Out[d + r] = (int)BRAM_acc_temp[d + r];
+                BRAM_acc_temp[d + r] = 0.0f;
+            }
+        }
+        store_output_BRAM2FIFO(BRAM_Out, FIFO_Out);
     }
 }
 
