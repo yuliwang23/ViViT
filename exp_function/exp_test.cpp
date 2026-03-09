@@ -38,7 +38,7 @@ int main()
     // 2. Random Number Generator Setup
     // ---------------------------------------------------------
     // Use Mersenne Twister engine for high-quality random numbers
-    std::mt19937 gen(10); // Fixed seed (42) for reproducible test results
+    std::mt19937 gen(10); // Fixed seed (10) for reproducible test results
     std::uniform_real_distribution<float> dist(MIN_VAL, MAX_VAL);
 
     // ---------------------------------------------------------
