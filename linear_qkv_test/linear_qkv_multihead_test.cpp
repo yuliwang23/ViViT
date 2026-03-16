@@ -52,12 +52,9 @@ void linear_qkv_naive(
     int bk[EMBED_DIM],
     int Wv[EMBED_DIM][EMBED_DIM],
     int bv[EMBED_DIM],
-    //int Q[NUM_HEADS][SEQ_LEN][HEAD_DIM],
-    //int K[NUM_HEADS][SEQ_LEN][HEAD_DIM],
-    //int V[NUM_HEADS][SEQ_LEN][HEAD_DIM])
-    int Q[1][SEQ_LEN][HEAD_DIM],
-    int K[1][SEQ_LEN][HEAD_DIM],
-    int V[1][SEQ_LEN][HEAD_DIM])
+    int Q[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+    int K[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+    int V[NUM_HEADS][SEQ_LEN][HEAD_DIM])
 {
     for (int i = 0; i < SEQ_LEN; i++) {
         for (int h = 0; h < EMBED_DIM; h++) {
@@ -72,15 +69,12 @@ void linear_qkv_naive(
                 v += X[i][j] * Wv[j][h];
             }
 
-            //int hc = h / HEAD_DIM;
-            //int hr = h % HEAD_DIM;
+            int hc = h / HEAD_DIM;
+            int hr = h % HEAD_DIM;
 
-            //Q[hc][i][hr] = q;
-            //K[hc][i][hr] = k;
-            //V[hc][i][hr] = v;
-            Q[0][i][h] = q;
-            K[0][i][h] = k;
-            V[0][i][h] = v;
+            Q[hc][i][hr] = q;
+            K[hc][i][hr] = k;
+            V[hc][i][hr] = v;
         }
     }
 }
@@ -167,7 +161,7 @@ int main() {
     // Run
     // ==============================
 
-    linear_qkv_naive(X,WTq,bq,WTk,bk,WTv,bv,Q_ref,K_ref,V_ref);
+    linear_qkv_naive(X,Wq,bq,Wk,bk,Wv,bv,Q_ref,K_ref,V_ref);
     linear_qkv_multihead(X,Wq,bq,Wk,bk,Wv,bv,Q_opt,K_opt,V_opt);
 
     int max_err = 0;
@@ -180,11 +174,32 @@ int main() {
         for (int i = 0; i < SEQ_LEN; i++) {
             for (int d = 0; d < HEAD_DIM; d++) {
 
-                /*int err_q = abs(Q_ref[h][i][d] - Q_opt[h][i][d]);
+                int err_q = abs(Q_ref[h][i][d] - Q_opt[h][i][d]);
                 int err_k = abs(K_ref[h][i][d] - K_opt[h][i][d]);
                 int err_v = abs(V_ref[h][i][d] - V_opt[h][i][d]);
+
+                max_err = max(max_err, err_q);
+                max_err = max(max_err, err_k);
+                max_err = max(max_err, err_v);
+
+
+                /*if (err_q > 1e-4f) printf("Q    [%d, %d, %d]   | %11.5f | %11.5f | %11.5f\n", h, i, d, Q_ref[h][i][d], Q_opt[h][i][d], err_q);
+                if (err_k > 1e-4f) printf("K    [%d, %d, %d]   | %11.5f | %11.5f | %11.5f\n", h, i, d, K_ref[h][i][d], K_opt[h][i][d], err_k);
+                if (err_v > 1e-4f) printf("V    [%d, %d, %d]   | %11.5f | %11.5f | %11.5f\n", h, i, d, V_ref[h][i][d], V_opt[h][i][d], err_v);*/
+
+                if (err_q != 0)
+                    printf("Q [%d,%d,%d] | %d | %d | %d\n",
+                        h,i,d,Q_ref[h][i][d],Q_opt[h][i][d],err_q);
+
+                if (err_k != 0)
+                    printf("K [%d,%d,%d] | %d | %d | %d\n",
+                        h,i,d,K_ref[h][i][d],K_opt[h][i][d],err_k);
+
+                if (err_v != 0)
+                    printf("V [%d,%d,%d] | %d | %d | %d\n",
+                        h,i,d,V_ref[h][i][d],V_opt[h][i][d],err_v);
                 
-                if (err_q > 0)
+                /*if (err_q > 0)
                     printf("Q [%d,%d,%d] | %d | %d | %d\n",
                         h,i,d,Q_ref[h][i][d],Q_opt[h][i][d],err_q);
 
@@ -195,45 +210,22 @@ int main() {
                 if (err_v > 0)
                     printf("V [%d,%d,%d] | %d | %d | %d\n",
                         h,i,d,V_ref[h][i][d],V_opt[h][i][d],err_v);*/
-
-                // identity matrix
-                /*int ref = X[i][h * HEAD_DIM + d];
-
-                int err_q = abs(ref - Q_opt[h][i][d]);
-                int err_k = abs(ref - K_opt[h][i][d]);
-                int err_v = abs(ref - V_opt[h][i][d]);
-
-                max_err = max_int(max_err, err_q);
-                max_err = max_int(max_err, err_k);
-                max_err = max_int(max_err, err_v);
-
-                if (err_q > 0)
-                printf("Q [%d,%d,%d] | X=%d | Opt=%d | Diff=%d\n",
-                    h,i,d,ref,Q_opt[h][i][d],err_q);
-
-                if (err_k > 0)
-                    printf("K [%d,%d,%d] | X=%d | Opt=%d | Diff=%d\n",
-                        h,i,d,ref,K_opt[h][i][d],err_k);
-
-                if (err_v > 0)
-                    printf("V [%d,%d,%d] | X=%d | Opt=%d | Diff=%d\n",
-                        h,i,d,ref,V_opt[h][i][d],err_v);*/
-
-                // One-Hot
-                bool q_match = compare_matrices(Wq, Q_opt, "Q");
-                bool k_match = compare_matrices(Wk, K_opt, "K");
-                bool v_match = compare_matrices(Wv, V_opt, "V");
-
-                if(q_match) cout << "Q fully matches Wq!" << endl;
-                if(k_match) cout << "K fully matches Wk!" << endl;
-                if(v_match) cout << "V fully matches Wv!" << endl;
-                
             }
         }
     }
 
-    printf("----------------------------------\n");
+    /*printf("----------------------------------\n");
     printf("Total Max error = %d\n", max_err);
+
+    cout << "==== Debug Input ====" << endl;
+
+    cout << "X[0][0] = " << X[0][0] << endl;
+    cout << "X[0][1] = " << X[0][1] << endl;
+
+    cout << "Wq[0][0] = " << Wq[0][0] << endl;
+    cout << "Wq[0][1] = " << Wq[0][1] << endl;
+
+    cout << "bq[0] = " << bq[0] << endl;*/
 
     // Debug check
     /*std::cout << "X[0][0] = " << X[0][0] << std::endl;

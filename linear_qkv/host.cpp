@@ -37,6 +37,8 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <fstream>
 #include <iomanip>
 #include <cmath>
+#include <sstream>
+#include <cstdlib>
 
 using namespace std;
 
@@ -401,12 +403,28 @@ int main(int argc, char* argv[])
 	}
 	X = reinterpret_cast<int(*)[EMBED_DIM]>(ptr);
 	// Initialize X with random values or test pattern
-	for (int i = 0; i < SEQ_LEN; i++) {
+	/*for (int i = 0; i < SEQ_LEN; i++) {
 		for (int j = 0; j < EMBED_DIM; j++) {
 			X[i][j] = rand() % 10 - 5; // Random values between -5 and 4
 		}
 	}
-	cout << "Done (" << SEQ_LEN << "x" << EMBED_DIM << " elements)" << endl;
+	cout << "Done (" << SEQ_LEN << "x" << EMBED_DIM << " elements)" << endl;*/
+	ifstream fx("X.txt");
+    //if (!fx.is_open()) { cerr << "Error: Cannot open X.txt" << endl; return EXIT_FAILURE; }
+	if (!fx.is_open()) {
+    perror("Failed to open X.txt");   // 會印出系統錯誤原因
+    char cwd[1024];
+    getcwd(cwd, sizeof(cwd));
+    cout << "Current working directory: " << cwd << endl;
+    return EXIT_FAILURE;
+}
+    for (int i = 0; i < SEQ_LEN; i++) {
+        string line; getline(fx, line);
+        stringstream ss(line);
+        for (int j = 0; j < EMBED_DIM; j++) ss >> X[i][j];
+    }
+    fx.close();
+    cout << "X loaded from X.txt" << endl;
 
 	// Allocate Wq: [EMBED_DIM][EMBED_DIM]
 	cout << "HOST-Info: Allocating and initializing data for Wq ... ";
@@ -415,12 +433,21 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 	Wq = reinterpret_cast<int(*)[EMBED_DIM]>(ptr);
-	for (int i = 0; i < EMBED_DIM; i++) {
+	/*for (int i = 0; i < EMBED_DIM; i++) {
 		for (int j = 0; j < EMBED_DIM; j++) {
 			Wq[i][j] = rand() % 10 - 5;
 		}
 	}
-	cout << "Done (" << EMBED_DIM << "x" << EMBED_DIM << " elements)" << endl;
+	cout << "Done (" << EMBED_DIM << "x" << EMBED_DIM << " elements)" << endl;*/
+	ifstream fwq("Wq.txt");
+    if (!fwq.is_open()) { cerr << "Error: Cannot open Wq.txt" << endl; return EXIT_FAILURE; }
+    for (int i = 0; i < EMBED_DIM; i++) {
+        string line; getline(fwq, line);
+        stringstream ss(line);
+        for (int j = 0; j < EMBED_DIM; j++) ss >> Wq[i][j];
+    }
+    fwq.close();
+    cout << "Wq loaded from Wq.txt" << endl;
 
 	// Allocate bq: [EMBED_DIM]
 	cout << "HOST-Info: Allocating and initializing data for bq ... ";
@@ -429,10 +456,15 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 	bq = reinterpret_cast<int*>(ptr);
-	for (int i = 0; i < EMBED_DIM; i++) {
+	/*for (int i = 0; i < EMBED_DIM; i++) {
 		bq[i] = rand() % 10 - 5;
 	}
-	cout << "Done (" << EMBED_DIM << " elements)" << endl;
+	cout << "Done (" << EMBED_DIM << " elements)" << endl;*/
+	ifstream fbq("bq.txt");
+    if (!fbq.is_open()) { cerr << "Error: Cannot open bq.txt" << endl; return EXIT_FAILURE; }
+    for (int i = 0; i < EMBED_DIM; i++) fbq >> bq[i];
+    fbq.close();
+    cout << "bq loaded from bq.txt" << endl;
 
 	// Allocate Wk: [EMBED_DIM][EMBED_DIM]
 	cout << "HOST-Info: Allocating and initializing data for Wk ... ";
@@ -441,12 +473,21 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 	Wk = reinterpret_cast<int(*)[EMBED_DIM]>(ptr);
-	for (int i = 0; i < EMBED_DIM; i++) {
+	/*for (int i = 0; i < EMBED_DIM; i++) {
 		for (int j = 0; j < EMBED_DIM; j++) {
 			Wk[i][j] = rand() % 10 - 5;
 		}
 	}
-	cout << "Done (" << EMBED_DIM << "x" << EMBED_DIM << " elements)" << endl;
+	cout << "Done (" << EMBED_DIM << "x" << EMBED_DIM << " elements)" << endl;*/
+	ifstream fwk("Wk.txt");
+    if (!fwk.is_open()) { cerr << "Error: Cannot open Wk.txt" << endl; return EXIT_FAILURE; }
+    for (int i = 0; i < EMBED_DIM; i++) {
+        string line; getline(fwk, line);
+        stringstream ss(line);
+        for (int j = 0; j < EMBED_DIM; j++) ss >> Wk[i][j];
+    }
+    fwk.close();
+    cout << "Wk loaded from Wk.txt" << endl;
 
 	// Allocate bk: [EMBED_DIM]
 	cout << "HOST-Info: Allocating and initializing data for bk ... ";
@@ -455,10 +496,15 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 	bk = reinterpret_cast<int*>(ptr);
-	for (int i = 0; i < EMBED_DIM; i++) {
+	/*for (int i = 0; i < EMBED_DIM; i++) {
 		bk[i] = rand() % 10 - 5;
 	}
-	cout << "Done (" << EMBED_DIM << " elements)" << endl;
+	cout << "Done (" << EMBED_DIM << " elements)" << endl;*/
+	ifstream fbk("bk.txt");
+    if (!fbk.is_open()) { cerr << "Error: Cannot open bk.txt" << endl; return EXIT_FAILURE; }
+    for (int i = 0; i < EMBED_DIM; i++) fbk >> bk[i];
+    fbk.close();
+    cout << "bk loaded from bk.txt" << endl;
 
 	// Allocate Wv: [EMBED_DIM][EMBED_DIM]
 	cout << "HOST-Info: Allocating and initializing data for Wv ... ";
@@ -467,12 +513,21 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 	Wv = reinterpret_cast<int(*)[EMBED_DIM]>(ptr);
-	for (int i = 0; i < EMBED_DIM; i++) {
+	/*for (int i = 0; i < EMBED_DIM; i++) {
 		for (int j = 0; j < EMBED_DIM; j++) {
 			Wv[i][j] = rand() % 10 - 5;
 		}
 	}
-	cout << "Done (" << EMBED_DIM << "x" << EMBED_DIM << " elements)" << endl;
+	cout << "Done (" << EMBED_DIM << "x" << EMBED_DIM << " elements)" << endl;*/
+	ifstream fwv("Wv.txt");
+    if (!fwv.is_open()) { cerr << "Error: Cannot open Wv.txt" << endl; return EXIT_FAILURE; }
+    for (int i = 0; i < EMBED_DIM; i++) {
+        string line; getline(fwv, line);
+        stringstream ss(line);
+        for (int j = 0; j < EMBED_DIM; j++) ss >> Wv[i][j];
+    }
+    fwv.close();
+    cout << "Wv loaded from Wv.txt" << endl;
 
 	// Allocate bv: [EMBED_DIM]
 	cout << "HOST-Info: Allocating and initializing data for bv ... ";
@@ -481,12 +536,18 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 	bv = reinterpret_cast<int*>(ptr);
-	for (int i = 0; i < EMBED_DIM; i++) {
+	/*for (int i = 0; i < EMBED_DIM; i++) {
 		bv[i] = rand() % 10 - 5;
 	}
-	cout << "Done (" << EMBED_DIM << " elements)" << endl;
+	cout << "Done (" << EMBED_DIM << " elements)" << endl;*/
 
 	// Allocate Q: [NUM_HEADS][SEQ_LEN][HEAD_DIM]
+	ifstream fbv("bv.txt");
+    if (!fbv.is_open()) { cerr << "Error: Cannot open bv.txt" << endl; return EXIT_FAILURE; }
+    for (int i = 0; i < EMBED_DIM; i++) fbv >> bv[i];
+    fbv.close();
+    cout << "bv loaded from bv.txt" << endl;
+
 	cout << "HOST-Info: Allocating memory for Q    ... ";
 	if (posix_memalign(&ptr, 4096, NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(int))) {
 		cout << endl << "HOST-Error: Out of Memory during memory allocation for Q array" << endl << endl;
