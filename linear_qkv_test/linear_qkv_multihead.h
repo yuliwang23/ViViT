@@ -38,58 +38,25 @@ void load_X_HBM2FIFO(
 void load_X_FIFO2BRAM(
     hls::stream<uint256_dt> &FIFO_X,
     int BRAM_X[SEQ_LEN][EMBED_DIM]);
-void load_Weight_Q_tile_HBM2FIFO(
-    int Wq[EMBED_DIM][EMBED_DIM], 
-    hls::stream<uint256_dt> &FIFO_Wq,
+
+void load_Weight_tile_HBM2FIFO(
+    int W[EMBED_DIM][EMBED_DIM], 
+    hls::stream<uint256_dt> &FIFO_W,
     int row_offset, // tile start row (in HBM)
     int col_offset  // tile start col (in HBM)
 );
 }
 
-void load_Weight_Q_tile_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_Wq,
-    int BRAM_Wq[TILE_SIZE][TILE_SIZE]
+void load_Weight_tile_FIFO2BRAM(
+    hls::stream<uint256_dt> &FIFO_W,
+    int BRAM_W[TILE_SIZE][TILE_SIZE]
 );
 
-void load_Bias_Q_HBM2BRAM(
-    int bq[EMBED_DIM],
-    int BRAM_bq[EMBED_DIM]
+void load_Bias_HBM2BRAM(
+    int b[EMBED_DIM],
+    int BRAM_b[EMBED_DIM]
 );
 
-
-void load_Weight_K_tile_HBM2FIFO(
-    int Wk[EMBED_DIM][EMBED_DIM], 
-    hls::stream<uint256_dt> &FIFO_Wk,
-    int row_offset,
-    int col_offset
-);
-
-void load_Weight_K_tile_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_Wk,
-    int BRAM_Wk[TILE_SIZE][TILE_SIZE]
-);
-
-void load_Bias_K_HBM2BRAM(
-    int bk[EMBED_DIM],
-    int BRAM_bk[EMBED_DIM]
-);
-
-void load_Weight_V_tile_HBM2FIFO(
-    int Wv[EMBED_DIM][EMBED_DIM], 
-    hls::stream<uint256_dt> &FIFO_Wv,
-    int row_offset,
-    int col_offset
-);
-
-void load_Weight_V_tile_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_Wv,
-    int BRAM_Wv[TILE_SIZE][TILE_SIZE]
-);
-
-void load_Bias_V_HBM2BRAM(
-    int bv[EMBED_DIM],
-    int BRAM_bv[EMBED_DIM]
-);
 
 void compute(
    int BRAM_X[SEQ_LEN][EMBED_DIM],
