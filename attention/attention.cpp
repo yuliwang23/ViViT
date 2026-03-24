@@ -36,14 +36,14 @@ int BRAM_Q[tile_size][HEAD_DIM];
 int BRAM_K[tile_size][HEAD_DIM];
 int BRAM_V[tile_size][HEAD_DIM];
 float BRAM_O[tile_size][HEAD_DIM];
-#pragma HLS ARRAY_PARTITION variable=BRAM_Q type=cyclic dim=2 factor=4
-#pragma HLS ARRAY_PARTITION variable=BRAM_K type=cyclic dim=2 factor=4
-#pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=2 factor=4
-#pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=1 factor=4
-#pragma HLS ARRAY_PARTITION variable=BRAM_O type=cyclic dim=2 factor=4
+#pragma HLS ARRAY_PARTITION variable=BRAM_Q type=cyclic dim=2 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_K type=cyclic dim=2 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=2 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=1 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_O type=cyclic dim=2 factor=8
 #pragma HLS BIND_STORAGE variable=BRAM_Q type=RAM_2P impl=bram
 #pragma HLS BIND_STORAGE variable=BRAM_K type=RAM_2P impl=bram
-#pragma HLS BIND_STORAGE variable=BRAM_V type=RAM_2P impl=bram
+#pragma HLS BIND_STORAGE variable=BRAM_V type=RAM_2P impl=lutram
 #pragma HLS BIND_STORAGE variable=BRAM_O type=RAM_2P impl=bram
 float BRAM_m[SEQ_LEN + 11];
 float BRAM_l[SEQ_LEN + 11];
@@ -118,7 +118,7 @@ void load_QKV_FIFO2BRAM(
                 #pragma HLS UNROLL
                 int start_bit = k * 32;
                 int end_bit = start_bit + 31;
-                BRAM_QKV[i][j + k] = temp_chunk.range(end_bit, start_bit);
+                BRAM_QKV[i][j + k] = temp_chunk.range(end_bit, start_bit);//only have a port to write
             }
         }
     }
@@ -203,8 +203,12 @@ void compute_softmax(
         compute_max_loop:
         for(int j = 0; j < tile_size; j++) {
             #pragma HLS PIPELINE II=1
-            float s = BRAM_score[i][j];
-            m_tmp = hls::max(m_tmp, s);
+            if(last_tile && j >=5){
+                BRAM_score[i][j] = m_tmp;
+            }else{
+                float s = BRAM_score[i][j];
+                m_tmp = hls::max(m_tmp, s);
+            }
         }
         FIFO_m.write(m_tmp);
         compute_sum_exp_loop:
