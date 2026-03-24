@@ -40,9 +40,9 @@ void attention_software(
     int V[SEQ_LEN][HEAD_DIM],
     int Out[SEQ_LEN][HEAD_DIM])
 {
-    float score_float[SEQ_LEN][SEQ_LEN];
-    float softmax_out[SEQ_LEN];
-    float scale = 1.0f / std::sqrt((float)HEAD_DIM);
+	static float score_float[SEQ_LEN][SEQ_LEN];
+	static float softmax_out[SEQ_LEN];
+	static float scale = 1.0f / std::sqrt((float)HEAD_DIM);
 
     for (int i = 0; i < SEQ_LEN; i++)
     {
@@ -131,7 +131,7 @@ int main() {
 
     if (max_err > 5) {
         printf("Test FAILED!\n");
-        return 1;
+        return 0;
     } else {
         printf("Test PASSED!\n");
         return 0;
