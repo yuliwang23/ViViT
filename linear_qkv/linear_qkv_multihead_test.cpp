@@ -124,6 +124,16 @@ int max_err = 0;
         }
     }
 
+    std::cout << "==== Debug Input ====" <<  std::endl;
+
+    std::cout << "X[0][0] = " << X[0][0] <<  std::endl;
+    std::cout << "X[0][1] = " << X[0][1] <<  std::endl;
+
+    std::cout << "Wq[0][0] = " << Wq[0][0] <<  std::endl;
+    std::cout << "Wq[0][1] = " << Wq[0][1] <<  std::endl;
+
+    std::cout << "bq[0] = " << bq[0] <<  std::endl;
+
     printf("----------------------------------------------------------\n");
     printf("Total Max error = %e\n", max_err);
     return 0;

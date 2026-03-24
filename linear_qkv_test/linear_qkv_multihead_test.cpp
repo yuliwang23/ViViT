@@ -100,7 +100,6 @@ void write_output(const char* filename, int data[NUM_HEADS][SEQ_LEN][HEAD_DIM]) 
     fout.close();
 }
 
-// 完整比對函數
 bool compare_matrices(int W[EMBED_DIM][EMBED_DIM], int Q[NUM_HEADS][SEQ_LEN][HEAD_DIM], const char* name) {
     bool identical = true;
     for(int i=0;i<SEQ_LEN;i++){
@@ -138,10 +137,6 @@ int main() {
     static int K_opt[NUM_HEADS][SEQ_LEN][HEAD_DIM];
     static int V_opt[NUM_HEADS][SEQ_LEN][HEAD_DIM];
 
-    // ==============================
-    // Read input
-    // ==============================
-
     if (!read_matrix("X.txt", SEQ_LEN, EMBED_DIM, X)) return -1;
 
     if (!read_matrix("Wq.txt", EMBED_DIM, EMBED_DIM, Wq)) return -1;
@@ -157,12 +152,8 @@ int main() {
     if (!read_vector("bk.txt", EMBED_DIM, bk)) return -1;
     if (!read_vector("bv.txt", EMBED_DIM, bv)) return -1;
 
-    // ==============================
-    // Run
-    // ==============================
-
     linear_qkv_naive(X,Wq,bq,Wk,bk,Wv,bv,Q_ref,K_ref,V_ref);
-    linear_qkv_multihead(X,Wq,bq,Wk,bk,Wv,bv,Q_opt,K_opt,V_opt);
+    linear_qkv_multihead(X,WTq,bq,WTk,bk,WTv,bv,Q_opt,K_opt,V_opt);
 
     int max_err = 0;
 
