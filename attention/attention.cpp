@@ -245,18 +245,19 @@ void compute_output(
             #pragma HLS PIPELINE II=1
             p[j] = FIFO_P.read();
         }
+        compute_output:
         for(int j = 0;j < HEAD_DIM;j++){
-            float O_new = 0.0f;
+            int O_new = 0;
             for(int k = 0;k < tile_size;k+=8){
                 #pragma HLS PIPELINE II=1
-                float local_O_new = 0.0f;
+                int local_O_new = 0;
                 for(int w = 0;w < 8;w++){
                     #pragma HLS UNROLL factor=8
-                    local_O_new += p[k+w]*(float)BRAM_V[k+w][j];
+                    local_O_new += (int)(p[k+w])*BRAM_V[k+w][j];
                 }
                 O_new += local_O_new;
             }
-            BRAM_O[i][j] = (BRAM_O[i][j]*exp_diff_mi + O_new*exp_diff_mij);
+            BRAM_O[i][j] = (BRAM_O[i][j]*exp_diff_mi + ((float)O_new)*exp_diff_mij);
         }
         BRAM_m[i] = new_m_i;
         BRAM_l[i] = new_l_i;
