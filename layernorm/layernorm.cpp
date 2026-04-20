@@ -17,6 +17,7 @@ void layernorm(float x[SEQ_LEN][EMBED_DIM],
 static float SRAM_X[EMBED_DIM];
 static float SRAM_gamma[EMBED_DIM];
 static float SRAM_beta[EMBED_DIM];
+static float scaler[SEQ_LEN]; // To store the scale factor for potential use in later layers
 static int8_dt SRAM_out[EMBED_DIM];
 hls::stream<uint256_dt> FIFO_X;
 hls::stream<uint256_dt> FIFO_out;
@@ -38,7 +39,7 @@ hls::stream<uint256_dt> FIFO_out;
         load_X_HBM2FIFO(x[i], FIFO_X);
         {
         load_X_FIFO2BRAM(FIFO_X, SRAM_X);
-        compute_mean_variance(SRAM_X, SRAM_gamma, SRAM_beta, SRAM_out);
+        compute_mean_variance(SRAM_X, SRAM_gamma, SRAM_beta, &scaler[i], SRAM_out);
         store_out_BRAM2FIFO(SRAM_out, FIFO_out);
         }
         store_out_FIFO2HBM(FIFO_out, out[i]);
@@ -107,6 +108,7 @@ void compute_mean_variance(
     float BRAM_X[EMBED_DIM],
     float gamma[EMBED_DIM],
     float beta[EMBED_DIM],
+    float *scaler,
     int8_dt out[EMBED_DIM]
 ){
     float local_global_mean = 0.0f; 
@@ -164,7 +166,7 @@ void compute_mean_variance(
             #pragma HLS UNROLL
             int idx = j + k;
             float scaled_val = norm_buffer[idx] * scale; 
-            
+            *scaler = scale; // Store the scale factor for potential use in later layers
             out[idx] = static_cast<int8_dt>(scaled_val); 
         }
     }

@@ -83,6 +83,7 @@ void compute_mean_variance(
     float BRAM_X[EMBED_DIM],
     float gamma[EMBED_DIM],
     float beta[EMBED_DIM],
+    float *scaler,
     int8_dt out[EMBED_DIM]
 );
 
