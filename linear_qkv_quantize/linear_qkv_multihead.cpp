@@ -119,29 +119,32 @@ hls::stream<uint256_dt> FIFO_V;
 }
 
 void load_X_HBM2FIFO(
-    int X[SEQ_LEN][EMBED_DIM],
+    float X[SEQ_LEN][EMBED_DIM],
     hls::stream<uint256_dt> &FIFO_X)
 {
-      uint256_dt *X_256_ptr = (uint256_dt*)X;
-      load_X_loop:
-      for (int i = 0; i < (SEQ_LEN * EMBED_DIM) / 8; i++) {
-      #pragma HLS PIPELINE II=1
-         uint256_dt temp_chunk = X_256_ptr[i];
-         FIFO_X.write(temp_chunk);
-      }
+    // Use reinterpret_cast for safe bitwise pointer casting
+    uint256_dt *X_256_ptr = reinterpret_cast<uint256_dt*>(X);
+    
+    load_X_loop:
+    for (int i = 0; i < (SEQ_LEN * EMBED_DIM) / 8; i++) {
+    #pragma HLS PIPELINE II=1
+        uint256_dt temp_chunk = X_256_ptr[i];
+        FIFO_X.write(temp_chunk);
+    }
 }
 
 void load_X_FIFO2BRAM(
     hls::stream<uint256_dt> &FIFO_X,
-    int BRAM_X[SEQ_LEN][EMBED_DIM])
+    float BRAM_X[SEQ_LEN][EMBED_DIM])
 {
    load_X_row:
    for (int i = 0; i < SEQ_LEN; i++){
       load_X_col:
       for (int j = 0; j < EMBED_DIM/8; j++){
       #pragma HLS PIPELINE II=1
-         //Local Register Buffer
-         int reg_buffer[8];
+         
+         // Local Register Buffer
+         float reg_buffer[8];
          #pragma HLS ARRAY_PARTITION variable=reg_buffer type=complete
          // Read & Unpack
          uint256_dt temp_chunk = FIFO_X.read();
@@ -150,8 +153,21 @@ void load_X_FIFO2BRAM(
             #pragma HLS UNROLL 
             int start_bit = k * 32;
             int end_bit = start_bit + 31;
-            reg_buffer[k] = temp_chunk.range(end_bit, start_bit);
+            
+            // Extract the raw 32 bits from the 256-bit chunk
+            uint32_t raw_bits = temp_chunk.range(end_bit, start_bit);
+            
+            //Use a union to perform safe Type Punning (Bits -> Float)
+            union {
+                uint32_t i_val;
+                float f_val;
+            } converter;
+            
+            // Assign bits to integer side, read out from float side
+            converter.i_val = raw_bits;
+            reg_buffer[k] = converter.f_val; 
          }
+         
          // Write
          write_bram_loop:
          for(int k = 0; k < 8; k++) {
