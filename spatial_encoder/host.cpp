@@ -43,20 +43,21 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using namespace std;
 
 #include <CL/cl.h>
-
-// TODO: Updata help_function.h. Need loadFile2Memory, run_custom_profiling?
 #include "help_functions.h"
 
 #define ALL_MESSAGES
 
-// TODO: Check the definition of these parameters. Are they correct for our spatial encoder implementation?
-constexpr int SEQ_LEN = 14 * 14 + 1;
+constexpr int SEQ_LEN = 14 * 14 + 1; // 14x14 patches + 1 CLS token
 constexpr int EMBED_DIM = 768;
 constexpr int NUM_HEADS = 12;
 constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS;
 constexpr int MLP_DIM = 3072;
+static_assert(SEQ_LEN == 197, "spatial encoder kernels expect 196 patches plus one CLS token");
+static_assert(HEAD_DIM == 64, "spatial encoder attention kernels expect 64 channels per head");
+static_assert(EMBED_DIM % NUM_HEADS == 0, "embedding dimension must split evenly across heads");
+static_assert(MLP_DIM == 4 * EMBED_DIM, "spatial encoder MLP expansion must be 4x embedding dimension");
 
-// host side helper functions
+// -----------------------------host side helper functions--------------------------------------
 // 初始化測試資料，例如 X、Wq、Wk、Wv、MLP_W1
 // TODO: modify to load weight from quantized model, such as .bin
 static void init_random_int(int *data, size_t count, int min_value, int max_value)
@@ -67,7 +68,7 @@ static void init_random_int(int *data, size_t count, int min_value, int max_valu
         data[i] = min_value + (rand() % range);
     }
 }
-// TODO: check where the previous version of host.cpp write this.
+// Modified from `posix_memalign`
 //  配置 4096-byte aligned host memory
 static void *host_aligned_alloc(size_t size_in_bytes)
 {
@@ -76,7 +77,6 @@ static void *host_aligned_alloc(size_t size_in_bytes)
     {
         return nullptr;
     }
-    memset(ptr, 0, size_in_bytes);
     return ptr;
 }
 // TODO: 非在此實作，改成呼叫 HLS compile 出來的 kernel
@@ -127,7 +127,7 @@ static void concat_attention_heads(int attention_heads[NUM_HEADS][SEQ_LEN][HEAD_
                 attention_concat[i][h * HEAD_DIM + d] = attention_heads[h][i][d];
 }
 
-// TODO: Check if this should in host or in kernel. If in kernel, we need to implement it in HLS and call it in the main attention kernel.
+// TODO: 非在此實作，改成呼叫 HLS compile 出來的 kernel
 static void residual_add(int a[SEQ_LEN][EMBED_DIM], int b[SEQ_LEN][EMBED_DIM], int out[SEQ_LEN][EMBED_DIM])
 {
     for (int i = 0; i < SEQ_LEN; i++)
@@ -160,6 +160,7 @@ static void mlp_host(int in[SEQ_LEN][EMBED_DIM],
         }
     }
 }
+//-------------------------------------------------------------------------------------
 
 // ----------------------------------Same as previous version of host.cpp----------------------------------
 // ********************************************************************************** //
@@ -531,7 +532,6 @@ int main(int argc, char *argv[])
     // -------------------------------------------------------------
     // Step 3.4: Create Kernels
     // -------------------------------------------------------------
-    // TODO: Check the kernel names "linear_qkv_multihead" and "attention_opt". If needed change them to match the kernel names in our HLS implementation
     cl_kernel K_linear_qkv_multihead, K_attention_opt;
 
 #ifdef ALL_MESSAGES
