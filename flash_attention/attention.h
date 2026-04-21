@@ -20,7 +20,7 @@ constexpr int tile_size = 16;
 constexpr int num_tiles = 13;
 
 
-void attention_opt(
+extern "C" void attention_opt(
     int Q[SEQ_LEN][HEAD_DIM],
     int K[SEQ_LEN][HEAD_DIM],
     int V[SEQ_LEN][HEAD_DIM],
