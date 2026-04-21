@@ -303,28 +303,6 @@ void load_All_Weights_Parallel(
     load_Weight_tile_FIFO2BRAM(FIFO_Wv, BRAM_Wv);
 }
 
-// void task_init_acc(
-//     int BRAM_bq[EMBED_DIM],
-//     int BRAM_bk[EMBED_DIM],
-//     int BRAM_bv[EMBED_DIM],
-//     int BRAM_Acc_Q[SEQ_LEN][TILE_SIZE],
-//     int BRAM_Acc_K[SEQ_LEN][TILE_SIZE],
-//     int BRAM_Acc_V[SEQ_LEN][TILE_SIZE],
-//     int j_tile
-// ) {
-//    #pragma HLS INLINE off
-//    init_acc_loop:
-//    for (int i = 0; i < SEQ_LEN; i++) {
-//       #pragma HLS PIPELINE II=1
-//       for (int j = 0; j < TILE_SIZE; j++) {
-//             #pragma HLS UNROLL factor=16
-//             BRAM_Acc_Q[i][j] = BRAM_bq[j_tile + j];
-//             BRAM_Acc_K[i][j] = BRAM_bk[j_tile + j];
-//             BRAM_Acc_V[i][j] = BRAM_bv[j_tile + j];
-//       }
-//    }
-// }
-
 void task_compute_tile(
    int BRAM_X[SEQ_LEN][EMBED_DIM],
    int BRAM_Wq[TILE_SIZE][TILE_SIZE],
