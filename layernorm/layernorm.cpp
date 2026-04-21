@@ -1,5 +1,6 @@
 #include "layernorm.h"
 
+extern "C"{
 void layernorm(float x[SEQ_LEN][EMBED_DIM],
                float gamma[EMBED_DIM],
                float beta[EMBED_DIM],
@@ -13,6 +14,7 @@ void layernorm(float x[SEQ_LEN][EMBED_DIM],
 #pragma HLS INTERFACE s_axilite port=gamma bundle=control
 #pragma HLS INTERFACE s_axilite port=beta bundle=control
 #pragma HLS INTERFACE s_axilite port=out bundle=control
+#pragma HLS INTERFACE s_axilite port=return bundle=control
 
 static float SRAM_X[EMBED_DIM];
 static float SRAM_gamma[EMBED_DIM];
@@ -45,7 +47,7 @@ hls::stream<uint256_dt> FIFO_out;
         store_out_FIFO2HBM(FIFO_out, out[i]);
     }
 }
-
+}
 void load_X_HBM2FIFO(
     float X[EMBED_DIM],
     hls::stream<uint256_dt> &FIFO_X)
@@ -132,8 +134,10 @@ void compute_mean_variance(
         float X_b_mean = local_sum * 0.0625f; 
         float M_2_B = local_sum_sq - (local_sum * local_sum * 0.0625f);
         float mean_diff = X_b_mean - local_global_mean;
-        local_global_mean += MEAN_WT.data[i] * mean_diff;
-        M2AB += M2_WT.data[i] * mean_diff * mean_diff + M_2_B;
+        //local_global_mean += MEAN_WT.data[i] * mean_diff;
+        //M2AB += M2_WT.data[i] * mean_diff * mean_diff + M_2_B;
+        local_global_mean += MEAN_WT[i] * mean_diff;
+        M2AB += M2_WT[i] * mean_diff * mean_diff + M_2_B;
     }
     
     float var = M2AB * EMBED_DIM_INV; 
