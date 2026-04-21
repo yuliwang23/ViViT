@@ -25,6 +25,7 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <string>
 
 using namespace std;
 
@@ -153,113 +154,6 @@ void print_int_table(int *Array, int Nb_Of_Elements, int Nb_Of_Columns, int Nb_O
     }
 }
 
-// ==================================================
-// Application: Checks the output results
-// ==================================================
-#include "kernel.h"
-
-bool check_output_results(int *DataIn_1, int *DataIn_2, int *DataIn_3, int CONST_arg, int *RES)
-{
-    bool error_detected = false;
-    int Max_Number_Of_Failers = 5;
-
-    // KVConstAdd
-    // .............
-    int Gold_KVConstAdd[SIZE_DataIn_1];
-    for (int i = 0; i < SIZE_DataIn_1; i++)
-    {
-        Gold_KVConstAdd[i] = DataIn_1[i] + CONST_arg;
-    }
-
-    //	for (int i=0; i< 5; i++) cout << DataIn_1[i] << " " << Gold_KVConstAdd[i] << endl;
-    //	exit(0);
-
-    // KA
-    // .............
-    int Gold_KA[SIZE_BUF_KA];
-    for (int i = 0; i < SIZE_BUF_KA; i++)
-    {
-        Gold_KA[i] = Gold_KVConstAdd[2 * i] * 3 + Gold_KVConstAdd[2 * i + 1] * 5 + Gold_KVConstAdd[2 * i + 2] * 7 + Gold_KVConstAdd[2 * i + 3] * 9;
-    }
-
-    // KpB
-    // .............
-    int Gold_KpB[SIZE_BUF_KpB];
-    for (int i = 0; i < SIZE_BUF_KpB; i++)
-    {
-        Gold_KpB[i] = (DataIn_2[i] + DataIn_3[i]) % 3;
-    }
-
-    //	for (int i=0; i< 5; i++) cout << DataIn_2[i] << " " << DataIn_3[i] << " " << Gold_KVAdd[i] << endl;
-    //	exit(0);
-
-    // KB
-    // .............
-    int Gold_KB[SIZE_BUF_KB];
-    int TMP_BUF[SIZE_BUF_KpB];
-    int val;
-
-    for (int i = 0; i < SIZE_BUF_KpB; i++)
-    {
-        TMP_BUF[i] = Gold_KpB[i] + 10;
-    }
-
-    for (int i = 0; i < SIZE_BUF_KB; i++)
-    {
-        val = TMP_BUF[i] * 3 + TMP_BUF[i + SIZE_RES] * 5 + TMP_BUF[i + 2 * SIZE_RES] * 7;
-        Gold_KB[i] = val;
-    }
-
-    // KCalc
-    // .............
-    int Gold_RES[SIZE_BUF_KB];
-    int TMP_RES[SIZE_RES];
-    int val1, val2;
-
-    for (int i = 0; i < SIZE_RES; i++)
-    {
-        val1 = (Gold_KA[i] - Gold_KB[i]) * (Gold_KA[i] + Gold_KB[i]);
-        TMP_RES[i] = val1;
-    }
-
-    for (int i = 0; i < SIZE_RES; i++)
-    {
-        if (TMP_RES[i] >= 0)
-            val2 = TMP_RES[i] % 3;
-        else
-            val2 = (TMP_RES[i] % 6) * TMP_RES[i];
-        Gold_RES[i] = val2;
-    }
-
-    // Compare Results
-    // .................
-    cout << endl
-         << "Host-Info: =============================================================" << endl;
-    cout << "Host-Info: Verifying final results (only " << Max_Number_Of_Failers << " first failures are printed)" << endl;
-
-    for (int i = 0; i < SIZE_RES; i++)
-    {
-        if (RES[i] != Gold_RES[i])
-        {
-            if (error_detected == false)
-            {
-                cout << "Host-Info: --------------------------------------------------------" << endl;
-                cout << "Host-Info: " << setw(10) << "i" << setw(10) << "Expected" << setw(10) << "Actual" << setw(10) << "Status" << endl;
-                cout << "Host-Info: --------------------------------------------------------" << endl;
-            }
-            if (Max_Number_Of_Failers-- > 0)
-            {
-                cout << "Host-Info: " << setw(10) << i << setw(10) << Gold_RES[i] << setw(10) << RES[i];
-                cout << setw(10) << "Error" << endl;
-                error_detected = true;
-            }
-        }
-    }
-    cout << "Host-Info: =============================================================" << endl;
-
-    return (error_detected);
-}
-
 // ============================================================================
 // Help Funciton: Custom Profiling
 // ============================================================================
@@ -285,21 +179,12 @@ void run_custom_profiling(int Nb_Of_Kernels, int Nb_Of_Memory_Tranfers, cl_event
 
     PROFILE = new profile_t[Nb_Of_Kernels + Nb_Of_Memory_Tranfers];
 
-    PROFILE[0].action_type = "kernel";
-    PROFILE[0].name = "K_KVConstAdd";
-    PROFILE[0].event = K_exe_event[0];
-    PROFILE[1].action_type = "kernel";
-    PROFILE[1].name = "K_KpB";
-    PROFILE[1].event = K_exe_event[1];
-    PROFILE[2].action_type = "kernel";
-    PROFILE[2].name = "K_KA";
-    PROFILE[2].event = K_exe_event[2];
-    PROFILE[3].action_type = "kernel";
-    PROFILE[3].name = "K_KB";
-    PROFILE[3].event = K_exe_event[3];
-    PROFILE[4].action_type = "kernel";
-    PROFILE[4].name = "K_KCalc";
-    PROFILE[4].event = K_exe_event[4];
+    for (int i = 0; i < Nb_Of_Kernels; i++)
+    {
+        PROFILE[i].action_type = "kernel";
+        PROFILE[i].name = list_of_kernel_names[i];
+        PROFILE[i].event = K_exe_event[i];
+    }
 
     for (int i = 0; i < Nb_Of_Memory_Tranfers; i++)
     {
@@ -401,7 +286,7 @@ void run_custom_profiling(int Nb_Of_Kernels, int Nb_Of_Memory_Tranfers, cl_event
     // ------------------------------
     // Print Profiling Data
     // ------------------------------
-    int Column_Widths[5] = {15, 16, 15, 15, 15}, Separation_Line_Width = 0;
+    int Column_Widths[5] = {25, 16, 18, 18, 15}, Separation_Line_Width = 0;
 
     // Print Table Header
     // ....................
@@ -411,9 +296,9 @@ void run_custom_profiling(int Nb_Of_Kernels, int Nb_Of_Memory_Tranfers, cl_event
     cout << "HOST-Info: " << string(Separation_Line_Width, '-') << endl;
 
     cout << "HOST-Info: " << left << setw(Column_Widths[0] - 1) << "Name"
-         << " | " << left << setw(Column_Widths[1] - 3) << "type"
-         << " | " << left << setw(Column_Widths[2] - 3) << "start"
-         << " | " << left << setw(Column_Widths[2] - 3) << "end"
+         << " | " << left << setw(Column_Widths[1] - 3) << "Type"
+         << " | " << left << setw(Column_Widths[2] - 3) << "Start"
+         << " | " << left << setw(Column_Widths[2] - 3) << "End"
          << " | " << left << setw(Column_Widths[2] - 3) << "Duration(ms)"
          << endl;
 
@@ -446,4 +331,6 @@ void run_custom_profiling(int Nb_Of_Kernels, int Nb_Of_Memory_Tranfers, cl_event
 
     cout << "HOST-Info: " << string(Separation_Line_Width, '-') << endl
          << endl;
+
+    delete[] PROFILE;
 }

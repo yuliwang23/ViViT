@@ -664,7 +664,7 @@ int main(int argc, char *argv[])
 #endif
     cl_mem GlobMem_BUF_X, GlobMem_BUF_Wq, GlobMem_BUF_bq,
         GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_Wv, GlobMem_BUF_bv,
-        GlobMem_BUF_Q, GlobMem_BUF_K, GlobMem_BUF_V;
+        GlobMem_BUF_Q, GlobMem_BUF_K, GlobMem_BUF_V, GlobMem_BUF_Attention_Out;
 
     GlobMem_BUF_X = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, SEQ_LEN * EMBED_DIM * sizeof(int), X_norm, &errCode);
     if (errCode != CL_SUCCESS)
@@ -746,6 +746,14 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
+    GlobMem_BUF_Attention_Out = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(int), Attention_Out, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to allocate GlobMem_BUF_Attention_Out" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
 
     // ============================================================================
     // Step 5: Set Kernel Arguments and Run the Application
@@ -772,22 +780,14 @@ int main(int argc, char *argv[])
     //         o) Copy Input Data from Host to Global Memory
     //         o) Submit Kernels for Execution
     //         o) Copy Results from Global Memory to Host
-    // ============================================================================
-    int Nb_Of_Mem_Events = 3,
-        Nb_Of_Exe_Events = 1 + NUM_HEADS;
-
-    cl_event Mem_op_event[Nb_Of_Mem_Events],
-        K_exe_event[Nb_Of_Exe_Events];
-
 #ifdef ALL_MESSAGES
-    cout << endl;
     cout << "HOST-Info: ============================================================= " << endl;
     cout << "HOST-Info: (Step 5) Run Application                                      " << endl;
     cout << "HOST-Info: ============================================================= " << endl;
 #endif
 
 // ----------------------------------------
-// Step 5.1: Set Kernel Arguments
+// Step 5.1: Set QKV Kernel Arguments
 // ----------------------------------------
 #ifdef ALL_MESSAGES
     cout << "HOST-Info: Setting Kernel arguments ..." << endl;
@@ -823,7 +823,12 @@ int main(int argc, char *argv[])
                                   GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_Wv, GlobMem_BUF_bv};
     cl_mem QKV_Output_Buffers[] = {GlobMem_BUF_Q, GlobMem_BUF_K, GlobMem_BUF_V};
 
-    // 把這些 host 資料搬到 FPGA global memory
+    int Nb_Of_Mem_Events = 4,
+        Nb_Of_Exe_Events = 1 + NUM_HEADS;
+
+    cl_event Mem_op_event[Nb_Of_Mem_Events],
+        K_exe_event[Nb_Of_Exe_Events];
+
     errCode = clEnqueueMigrateMemObjects(Command_Queue, 7, QKV_Input_Buffers, 0, 0, NULL, &Mem_op_event[0]);
     if (errCode != CL_SUCCESS)
     {
@@ -832,26 +837,31 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
-    //-----------------------------------------------------------------------
-    // Q/K/V 是 output buffer 原本內容不用保留，只需要在 device 端準備好空間
 
-    errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, QKV_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 1, &Mem_op_event[0], &Mem_op_event[1]);
-    if (errCode != CL_SUCCESS)
-    {
-        cout << endl
-             << "Host-Error: Failed to prepare QKV output buffers" << endl
-             << endl;
-        return EXIT_FAILURE;
-    }
+    // errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, QKV_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 1, &Mem_op_event[0], &Mem_op_event[1]);
+    // if (errCode != CL_SUCCESS)
+    // {
+    //     cout << endl
+    //          << "Host-Error: Failed to prepare QKV output buffers" << endl
+    //          << endl;
+    //     return EXIT_FAILURE;
+    // }
+
+    // errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[2]);
+    // if (errCode != CL_SUCCESS)
+    // {
+    //     cout << endl
+    //          << "Host-Error: Failed to prepare attention output buffer" << endl
+    //          << endl;
+    //     return EXIT_FAILURE;
+    // }
 
     // ----------------------------------------
     // Step 5.3: Submit Kernels for Execution
     // ----------------------------------------
     cout << "HOST-Info: Submitting Kernel K_linear_qkv_multihead ..." << endl;
 
-    // 等input buffers 搬完、output buffers 準備完
     cl_event qkv_wait_list[] = {Mem_op_event[0], Mem_op_event[1]};
-    // 啟動 FPGA QKV kernel，讓 FPGA 開始計算
     errCode = clEnqueueTask(Command_Queue, K_linear_qkv_multihead, 2, qkv_wait_list, &K_exe_event[0]);
     if (errCode != CL_SUCCESS)
     {
@@ -861,64 +871,60 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-// ---------------------------------------------------------
-// Step 5.4: Submit Copy Results from Global Memory to Host
-// ---------------------------------------------------------
 #ifdef ALL_MESSAGES
-    cout << "HOST_Info: Submitting Copy Results data from Global Memory to Host ..." << endl;
+    cout << "HOST_Info: Submitting K_attention_opt with device-resident Q/K/V ..." << endl;
 #endif
+    // Create sub-buffers for each head's Q, K, V, and attention output, and set them as kernel arguments for K_attention_opt
+    cl_mem GlobMem_BUF_head_Q[NUM_HEADS] = {NULL};
+    cl_mem GlobMem_BUF_head_K[NUM_HEADS] = {NULL};
+    cl_mem GlobMem_BUF_head_V[NUM_HEADS] = {NULL};
+    cl_mem GlobMem_BUF_head_Out[NUM_HEADS] = {NULL};
+    const size_t HEAD_BYTES = SEQ_LEN * HEAD_DIM * sizeof(int);
 
-    errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, QKV_Output_Buffers, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[0], &Mem_op_event[2]);
-    if (errCode != CL_SUCCESS)
-    {
-        cout << endl
-             << "Host-Error: Failed to submit Copy Q/K/V results to host" << endl
-             << endl;
-        return EXIT_FAILURE;
-    }
-    clWaitForEvents(1, &Mem_op_event[2]);
-
-    cout << "HOST-Info: Submitting Kernel K_attention_opt for each head ..." << endl;
     for (int h = 0; h < NUM_HEADS; h++)
     {
-        cl_mem GlobMem_BUF_head_Q = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, SEQ_LEN * HEAD_DIM * sizeof(int), Q[h], &errCode);
+        cl_buffer_region head_region;
+        head_region.origin = static_cast<size_t>(h) * HEAD_BYTES;
+        head_region.size = HEAD_BYTES;
+        // Create sub-buffers for each head's Q, K, V, and attention output
+        GlobMem_BUF_head_Q[h] = clCreateSubBuffer(GlobMem_BUF_Q, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode);
         if (errCode != CL_SUCCESS)
         {
             cout << endl
-                 << "Host-Error: Failed to allocate head Q" << endl
+                 << "Host-Error: Failed to create head Q sub-buffer" << endl
                  << endl;
             return EXIT_FAILURE;
         }
-        cl_mem GlobMem_BUF_head_K = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, SEQ_LEN * HEAD_DIM * sizeof(int), K_out[h], &errCode);
+        GlobMem_BUF_head_K[h] = clCreateSubBuffer(GlobMem_BUF_K, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode);
         if (errCode != CL_SUCCESS)
         {
             cout << endl
-                 << "Host-Error: Failed to allocate head K" << endl
+                 << "Host-Error: Failed to create head K sub-buffer" << endl
                  << endl;
             return EXIT_FAILURE;
         }
-        cl_mem GlobMem_BUF_head_V = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, SEQ_LEN * HEAD_DIM * sizeof(int), V[h], &errCode);
+        GlobMem_BUF_head_V[h] = clCreateSubBuffer(GlobMem_BUF_V, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode);
         if (errCode != CL_SUCCESS)
         {
             cout << endl
-                 << "Host-Error: Failed to allocate head V" << endl
+                 << "Host-Error: Failed to create head V sub-buffer" << endl
                  << endl;
             return EXIT_FAILURE;
         }
-        cl_mem GlobMem_BUF_head_Out = clCreateBuffer(Context, CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR, SEQ_LEN * HEAD_DIM * sizeof(int), Attention_Out[h], &errCode);
+        GlobMem_BUF_head_Out[h] = clCreateSubBuffer(GlobMem_BUF_Attention_Out, CL_MEM_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode);
         if (errCode != CL_SUCCESS)
         {
             cout << endl
-                 << "Host-Error: Failed to allocate head attention output" << endl
+                 << "Host-Error: Failed to create head attention output sub-buffer" << endl
                  << endl;
             return EXIT_FAILURE;
         }
 
         errCode = false;
-        errCode |= clSetKernelArg(K_attention_opt, 0, sizeof(cl_mem), &GlobMem_BUF_head_Q);
-        errCode |= clSetKernelArg(K_attention_opt, 1, sizeof(cl_mem), &GlobMem_BUF_head_K);
-        errCode |= clSetKernelArg(K_attention_opt, 2, sizeof(cl_mem), &GlobMem_BUF_head_V);
-        errCode |= clSetKernelArg(K_attention_opt, 3, sizeof(cl_mem), &GlobMem_BUF_head_Out);
+        errCode |= clSetKernelArg(K_attention_opt, 0, sizeof(cl_mem), &GlobMem_BUF_head_Q[h]);
+        errCode |= clSetKernelArg(K_attention_opt, 1, sizeof(cl_mem), &GlobMem_BUF_head_K[h]);
+        errCode |= clSetKernelArg(K_attention_opt, 2, sizeof(cl_mem), &GlobMem_BUF_head_V[h]);
+        errCode |= clSetKernelArg(K_attention_opt, 3, sizeof(cl_mem), &GlobMem_BUF_head_Out[h]);
         if (errCode != CL_SUCCESS)
         {
             cout << endl
@@ -927,26 +933,7 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        cl_mem Attention_Input_Buffers[] = {GlobMem_BUF_head_Q, GlobMem_BUF_head_K, GlobMem_BUF_head_V};
-        cl_event attention_mem_in_event, attention_mem_out_prepare_event, attention_mem_out_read_event;
-        errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, Attention_Input_Buffers, 0, 0, NULL, &attention_mem_in_event);
-        if (errCode != CL_SUCCESS)
-        {
-            cout << endl
-                 << "Host-Error: Failed to write attention input buffers" << endl
-                 << endl;
-            return EXIT_FAILURE;
-        }
-        errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 1, &attention_mem_in_event, &attention_mem_out_prepare_event);
-        if (errCode != CL_SUCCESS)
-        {
-            cout << endl
-                 << "Host-Error: Failed to prepare attention output buffer" << endl
-                 << endl;
-            return EXIT_FAILURE;
-        }
-
-        cl_event attention_wait_list[] = {attention_mem_in_event, attention_mem_out_prepare_event};
+        cl_event attention_wait_list[] = {K_exe_event[0], Mem_op_event[2]};
         errCode = clEnqueueTask(Command_Queue, K_attention_opt, 2, attention_wait_list, &K_exe_event[1 + h]);
         if (errCode != CL_SUCCESS)
         {
@@ -955,23 +942,30 @@ int main(int argc, char *argv[])
                  << endl;
             return EXIT_FAILURE;
         }
-        errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[1 + h], &attention_mem_out_read_event);
-        if (errCode != CL_SUCCESS)
-        {
-            cout << endl
-                 << "Host-Error: Failed to copy attention output to host" << endl
-                 << endl;
-            return EXIT_FAILURE;
-        }
-        clWaitForEvents(1, &attention_mem_out_read_event);
+    }
 
-        clReleaseEvent(attention_mem_in_event);
-        clReleaseEvent(attention_mem_out_prepare_event);
-        clReleaseEvent(attention_mem_out_read_event);
-        clReleaseMemObject(GlobMem_BUF_head_Q);
-        clReleaseMemObject(GlobMem_BUF_head_K);
-        clReleaseMemObject(GlobMem_BUF_head_V);
-        clReleaseMemObject(GlobMem_BUF_head_Out);
+// ---------------------------------------------------------
+// Step 5.4: Submit Copy Attention Results from Device to Host
+// ---------------------------------------------------------
+#ifdef ALL_MESSAGES
+    cout << "HOST_Info: Submitting Copy Attention results from Global Memory to Host ..." << endl;
+#endif
+    errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_HOST, NUM_HEADS, &K_exe_event[1], &Mem_op_event[3]);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to copy attention output to host" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    clWaitForEvents(1, &Mem_op_event[3]);
+
+    for (int h = 0; h < NUM_HEADS; h++)
+    {
+        clReleaseMemObject(GlobMem_BUF_head_Q[h]);
+        clReleaseMemObject(GlobMem_BUF_head_K[h]);
+        clReleaseMemObject(GlobMem_BUF_head_V[h]);
+        clReleaseMemObject(GlobMem_BUF_head_Out[h]);
     }
 
     auto Host_Post_Start = chrono::high_resolution_clock::now();
@@ -1063,6 +1057,7 @@ int main(int argc, char *argv[])
     clReleaseMemObject(GlobMem_BUF_K);
     clReleaseMemObject(GlobMem_BUF_V);
 
+    clReleaseMemObject(GlobMem_BUF_Attention_Out);
     clReleaseKernel(K_linear_qkv_multihead);
     clReleaseKernel(K_attention_opt);
 
