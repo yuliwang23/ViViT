@@ -823,7 +823,7 @@ int main(int argc, char *argv[])
                                   GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_Wv, GlobMem_BUF_bv};
     cl_mem QKV_Output_Buffers[] = {GlobMem_BUF_Q, GlobMem_BUF_K, GlobMem_BUF_V};
 
-    int Nb_Of_Mem_Events = 4,
+    int Nb_Of_Mem_Events = 3,
         Nb_Of_Exe_Events = 1 + NUM_HEADS;
 
     cl_event Mem_op_event[Nb_Of_Mem_Events],
@@ -847,22 +847,22 @@ int main(int argc, char *argv[])
     //     return EXIT_FAILURE;
     // }
 
-    // errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[2]);
-    // if (errCode != CL_SUCCESS)
-    // {
-    //     cout << endl
-    //          << "Host-Error: Failed to prepare attention output buffer" << endl
-    //          << endl;
-    //     return EXIT_FAILURE;
-    // }
+    errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[1]);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to prepare attention output buffer" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
 
     // ----------------------------------------
     // Step 5.3: Submit Kernels for Execution
     // ----------------------------------------
     cout << "HOST-Info: Submitting Kernel K_linear_qkv_multihead ..." << endl;
 
-    cl_event qkv_wait_list[] = {Mem_op_event[0], Mem_op_event[1]};
-    errCode = clEnqueueTask(Command_Queue, K_linear_qkv_multihead, 2, qkv_wait_list, &K_exe_event[0]);
+    cl_event qkv_wait_list[] = {Mem_op_event[0]};
+    errCode = clEnqueueTask(Command_Queue, K_linear_qkv_multihead, 1, qkv_wait_list, &K_exe_event[0]);
     if (errCode != CL_SUCCESS)
     {
         cout << endl
@@ -933,7 +933,7 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        cl_event attention_wait_list[] = {K_exe_event[0], Mem_op_event[2]};
+        cl_event attention_wait_list[] = {K_exe_event[0], Mem_op_event[1]};
         errCode = clEnqueueTask(Command_Queue, K_attention_opt, 2, attention_wait_list, &K_exe_event[1 + h]);
         if (errCode != CL_SUCCESS)
         {
@@ -950,7 +950,7 @@ int main(int argc, char *argv[])
 #ifdef ALL_MESSAGES
     cout << "HOST_Info: Submitting Copy Attention results from Global Memory to Host ..." << endl;
 #endif
-    errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_HOST, NUM_HEADS, &K_exe_event[1], &Mem_op_event[3]);
+    errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_HOST, NUM_HEADS, &K_exe_event[1], &Mem_op_event[2]);
     if (errCode != CL_SUCCESS)
     {
         cout << endl
@@ -958,7 +958,7 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
-    clWaitForEvents(1, &Mem_op_event[3]);
+    clWaitForEvents(1, &Mem_op_event[2]);
 
     for (int h = 0; h < NUM_HEADS; h++)
     {
