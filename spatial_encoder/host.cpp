@@ -532,7 +532,7 @@ int main(int argc, char *argv[])
     // -------------------------------------------------------------
     // Step 3.4: Create Kernels
     // -------------------------------------------------------------
-    cl_kernel K_linear_qkv_multihead, K_attention_opt;
+    cl_kernel K_linear_qkv_multihead, K_attention_opt[NUM_HEADS];
 
 #ifdef ALL_MESSAGES
     cout << "HOST-Info: Creating a Kernel: linear_qkv_multihead ..." << endl;
@@ -547,15 +547,18 @@ int main(int argc, char *argv[])
     }
 
 #ifdef ALL_MESSAGES
-    cout << "HOST-Info: Creating a Kernel: attention_opt ..." << endl;
+    cout << "HOST-Info: Creating Kernels: attention_opt[0.." << (NUM_HEADS - 1) << "] ..." << endl;
 #endif
-    K_attention_opt = clCreateKernel(Program, "attention_opt", &errCode);
-    if (errCode != CL_SUCCESS)
+    for (int h = 0; h < NUM_HEADS; h++)
     {
-        cout << endl
-             << "HOST-Error: Failed to create K_attention_opt" << endl
-             << endl;
-        return EXIT_FAILURE;
+        K_attention_opt[h] = clCreateKernel(Program, "attention_opt", &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to create K_attention_opt[" << h << "]" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
     }
     // TODO: Add mlp kernel
 
@@ -921,24 +924,24 @@ int main(int argc, char *argv[])
         }
 
         errCode = false;
-        errCode |= clSetKernelArg(K_attention_opt, 0, sizeof(cl_mem), &GlobMem_BUF_head_Q[h]);
-        errCode |= clSetKernelArg(K_attention_opt, 1, sizeof(cl_mem), &GlobMem_BUF_head_K[h]);
-        errCode |= clSetKernelArg(K_attention_opt, 2, sizeof(cl_mem), &GlobMem_BUF_head_V[h]);
-        errCode |= clSetKernelArg(K_attention_opt, 3, sizeof(cl_mem), &GlobMem_BUF_head_Out[h]);
+        errCode |= clSetKernelArg(K_attention_opt[h], 0, sizeof(cl_mem), &GlobMem_BUF_head_Q[h]);
+        errCode |= clSetKernelArg(K_attention_opt[h], 1, sizeof(cl_mem), &GlobMem_BUF_head_K[h]);
+        errCode |= clSetKernelArg(K_attention_opt[h], 2, sizeof(cl_mem), &GlobMem_BUF_head_V[h]);
+        errCode |= clSetKernelArg(K_attention_opt[h], 3, sizeof(cl_mem), &GlobMem_BUF_head_Out[h]);
         if (errCode != CL_SUCCESS)
         {
             cout << endl
-                 << "Host-ERROR: Failed to set attention kernel arguments" << endl
+                 << "Host-ERROR: Failed to set attention kernel arguments for head " << h << endl
                  << endl;
             return EXIT_FAILURE;
         }
 
         cl_event attention_wait_list[] = {K_exe_event[0], Mem_op_event[1]};
-        errCode = clEnqueueTask(Command_Queue, K_attention_opt, 2, attention_wait_list, &K_exe_event[1 + h]);
+        errCode = clEnqueueTask(Command_Queue, K_attention_opt[h], 2, attention_wait_list, &K_exe_event[1 + h]);
         if (errCode != CL_SUCCESS)
         {
             cout << endl
-                 << "HOST-Error: Failed to submit K_attention_opt" << endl
+                 << "HOST-Error: Failed to submit K_attention_opt for head " << h << endl
                  << endl;
             return EXIT_FAILURE;
         }
@@ -1059,7 +1062,8 @@ int main(int argc, char *argv[])
 
     clReleaseMemObject(GlobMem_BUF_Attention_Out);
     clReleaseKernel(K_linear_qkv_multihead);
-    clReleaseKernel(K_attention_opt);
+    for (int h = 0; h < NUM_HEADS; h++)
+        clReleaseKernel(K_attention_opt[h]);
 
     clReleaseProgram(Program);
     clReleaseCommandQueue(Command_Queue);

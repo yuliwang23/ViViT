@@ -18,14 +18,17 @@ constexpr int NUM_HEADS = 12;
 constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS;
 constexpr float scale = 0.125;
 constexpr int VEC_MAX = SEQ_LEN;
-constexpr int tile_size = 16; 
+constexpr int tile_size = 16;
 
 // ================= Top =================
-void attention_opt(
-    int Q[SEQ_LEN][HEAD_DIM],
-    int K[SEQ_LEN][HEAD_DIM],
-    int V[SEQ_LEN][HEAD_DIM],
-    int Out[SEQ_LEN][HEAD_DIM]);
+extern "C"
+{
+    void attention_opt(
+        int Q[SEQ_LEN][HEAD_DIM],
+        int K[SEQ_LEN][HEAD_DIM],
+        int V[SEQ_LEN][HEAD_DIM],
+        int Out[SEQ_LEN][HEAD_DIM]);
+}
 
 // ================= Load Q/K/V =================
 void load_Q_HBM2FIFO(
@@ -40,7 +43,7 @@ void load_V_HBM2FIFO(
     int V[SEQ_LEN][HEAD_DIM],
     hls::stream<uint256_dt> &FIFO_V);
 
-// ================= FIFO → BRAM =================
+// ================= FIFO ??? BRAM =================
 void load_Q_FIFO2BRAM(
     hls::stream<uint256_dt> &FIFO_Q,
     int BRAM_Q[HEAD_DIM]);
@@ -57,8 +60,7 @@ void load_V_FIFO2BRAM(
 void compute_score(
     hls::stream<uint256_dt> &FIFO_Q,
     hls::stream<uint256_dt> &FIFO_K,
-    hls::stream<float> &FIFO_score
-);
+    hls::stream<float> &FIFO_score);
 
 // ================= Softmax =================
 void load_score_FIFO2BRAM(
@@ -93,8 +95,7 @@ void compute_softmax(
 void compute_attention_output(
     hls::stream<float> &FIFO_softmax_out,
     hls::stream<uint256_dt> &FIFO_V,
-    hls::stream<uint256_dt> &FIFO_Out
-);
+    hls::stream<uint256_dt> &FIFO_Out);
 
 void store_output_BRAM2FIFO(
     int BRAM_Out[HEAD_DIM],
