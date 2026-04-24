@@ -1,162 +1,166 @@
 #include "attention.h"
-
-extern "C"
+void attention_opt(
+    float Q[SEQ_LEN][HEAD_DIM],
+    float K[SEQ_LEN][HEAD_DIM],
+    float V[SEQ_LEN][HEAD_DIM],
+    float Out[SEQ_LEN][HEAD_DIM])
 {
-    void attention_opt(
-        int Q[SEQ_LEN][HEAD_DIM],
-        int K[SEQ_LEN][HEAD_DIM],
-        int V[SEQ_LEN][HEAD_DIM],
-        int Out[SEQ_LEN][HEAD_DIM])
-    {
-#pragma HLS INTERFACE m_axi port = Q offset = slave bundle = gmem0 max_widen_bitwidth = 256
-#pragma HLS INTERFACE m_axi port = K offset = slave bundle = gmem1 max_widen_bitwidth = 256
-#pragma HLS INTERFACE m_axi port = V offset = slave bundle = gmem2 max_widen_bitwidth = 256
-#pragma HLS INTERFACE m_axi port = Out offset = slave bundle = gmem3 max_widen_bitwidth = 256
-#pragma HLS INTERFACE s_axilite port = Q bundle = control
-#pragma HLS INTERFACE s_axilite port = K bundle = control
-#pragma HLS INTERFACE s_axilite port = V bundle = control
-#pragma HLS INTERFACE s_axilite port = Out bundle = control
-#pragma HLS INTERFACE s_axilite port = return bundle = control
-        hls::stream<uint256_dt> FIFO_Q;
-        hls::stream<uint256_dt> FIFO_K;
-        hls::stream<uint256_dt> FIFO_V;
-        hls::stream<float> FIFO_score;
-        hls::stream<float> FIFO_softmax_out;
-        hls::stream<uint256_dt> FIFO_Out;
-#pragma HLS STREAM variable = FIFO_Q depth = 256
-#pragma HLS STREAM variable = FIFO_K depth = 256
-#pragma HLS STREAM variable = FIFO_V depth = 256
-#pragma HLS STREAM variable = FIFO_score depth = 256
-#pragma HLS STREAM variable = FIFO_softmax_out depth = 256
-#pragma HLS STREAM variable = FIFO_Out depth = 256
-
-#pragma HLS DATAFLOW
-
-        load_Q_HBM2FIFO(Q, FIFO_Q);
-        load_K_HBM2FIFO(K, FIFO_K);
-        load_V_HBM2FIFO(V, FIFO_V);
-        compute_score(FIFO_Q, FIFO_K, FIFO_score);
-        compute_softmax(FIFO_score, FIFO_softmax_out);
-        compute_attention_output(FIFO_softmax_out, FIFO_V, FIFO_Out);
-        store_result_FIFO2HBM(FIFO_Out, Out);
-    }
-}
-
-void load_Q_HBM2FIFO(
-    int Q[SEQ_LEN][HEAD_DIM],
-    hls::stream<uint256_dt> &FIFO_Q)
-{
-#pragma HLS INLINE off
-    uint256_dt *Q_256_ptr = (uint256_dt *)Q;
-load_Q_loop:
-    for (int i = 0; i < (SEQ_LEN * HEAD_DIM) / 8; i++)
-    {
-#pragma HLS PIPELINE II = 1
-        uint256_dt temp_chunk = Q_256_ptr[i];
-        FIFO_Q.write(temp_chunk);
-    }
-}
-
-void load_K_HBM2FIFO(
-    int K[SEQ_LEN][HEAD_DIM],
-    hls::stream<uint256_dt> &FIFO_K)
-{
-#pragma HLS INLINE off
-    uint256_dt *K_256_ptr = (uint256_dt *)K;
-load_K_loop_seq_len_times:
-    for (int time = 0; time < SEQ_LEN; time++)
-    {
-    load_K_loop:
-        for (int i = 0; i < (SEQ_LEN * HEAD_DIM) / 8; i++)
-        {
-#pragma HLS PIPELINE II = 1
-            uint256_dt temp_chunk = K_256_ptr[i];
-            FIFO_K.write(temp_chunk);
+#pragma HLS INTERFACE m_axi port=Q offset=slave bundle=attention_gmem0 max_widen_bitwidth=256
+#pragma HLS INTERFACE m_axi port=K offset=slave bundle=attention_gmem1 max_widen_bitwidth=256
+#pragma HLS INTERFACE m_axi port=V offset=slave bundle=attention_gmem2 max_widen_bitwidth=256
+#pragma HLS INTERFACE m_axi port=Out offset=slave bundle=attention_gmem3 max_widen_bitwidth=256
+#pragma HLS INTERFACE s_axilite port=Q bundle=control
+#pragma HLS INTERFACE s_axilite port=K bundle=control
+#pragma HLS INTERFACE s_axilite port=V bundle=control
+#pragma HLS INTERFACE s_axilite port=Out bundle=control
+#pragma HLS INTERFACE s_axilite port=return bundle=control
+hls::stream<uint256_dt> FIFO_Q_chunk("FIFO_Q");
+hls::stream<uint256_dt> FIFO_K_chunk("FIFO_K");
+hls::stream<uint256_dt> FIFO_V_chunk("FIFO_V");
+hls::stream<float> FIFO_score("FIFO_score");
+hls::stream<float> FIFO_P("FIFO_P");
+hls::stream<float> FIFO_m("FIFO_m");
+hls::stream<float> FIFO_l("FIFO_l");
+hls::stream<uint256_dt> FIFO_O_out("FIFO_O_out");
+#pragma HLS STREAM variable=FIFO_Q_chunk depth=256
+#pragma HLS STREAM variable=FIFO_K_chunk depth=256
+#pragma HLS STREAM variable=FIFO_V_chunk depth=256
+#pragma HLS STREAM variable=FIFO_score depth=256
+#pragma HLS STREAM variable=FIFO_P depth=256
+#pragma HLS STREAM variable=FIFO_l depth=256
+#pragma HLS STREAM variable=FIFO_m depth=256
+#pragma HLS STREAM variable=FIFO_O_out depth=256
+float BRAM_Q[tile_size][HEAD_DIM];
+float BRAM_K[tile_size][HEAD_DIM];
+float BRAM_V[tile_size][HEAD_DIM];
+float BRAM_O[tile_size][HEAD_DIM];
+float BRAM_m[tile_size];
+float BRAM_l[tile_size];
+#pragma HLS ARRAY_PARTITION variable=BRAM_Q type=cyclic dim=2 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_K type=cyclic dim=2 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=2 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=1 factor=8
+#pragma HLS ARRAY_PARTITION variable=BRAM_O type=cyclic dim=2 factor=8
+#pragma HLS BIND_STORAGE variable=BRAM_Q type=RAM_2P impl=bram
+#pragma HLS BIND_STORAGE variable=BRAM_K type=RAM_2P impl=bram
+#pragma HLS BIND_STORAGE variable=BRAM_V type=RAM_2P impl=lutram
+#pragma HLS BIND_STORAGE variable=BRAM_O type=RAM_2P impl=bram
+    Outer_Q_Loop:
+    for (int i = 0; i < num_tiles; i++) {
+        bool last_tile_Q = (i == num_tiles - 1);
+        init_states(BRAM_m, BRAM_l, BRAM_O);
+        uint256_dt *Q_ptr = (uint256_dt*)&Q[i * tile_size];
+        load_tile_HBM2FIFO(Q_ptr, FIFO_Q_chunk, last_tile_Q); 
+        load_QKV_FIFO2BRAM(FIFO_Q_chunk, BRAM_Q);
+        Inner_KV_Loop:
+        for (int j = 0; j < num_tiles; j++) {
+            bool last_tile_KV = (j == num_tiles - 1);
+            #pragma HLS DATAFLOW
+            uint256_dt *K_ptr = (uint256_dt*)&K[j * tile_size];
+            load_tile_HBM2FIFO(K_ptr, FIFO_K_chunk, last_tile_KV);
+            load_QKV_FIFO2BRAM(FIFO_K_chunk, BRAM_K);
+            uint256_dt *V_ptr = (uint256_dt*)&V[j * tile_size];
+            load_tile_HBM2FIFO(V_ptr, FIFO_V_chunk, last_tile_KV);
+            load_QKV_FIFO2BRAM(FIFO_V_chunk, BRAM_V);
+            compute_score(BRAM_Q, BRAM_K, FIFO_score);
+            compute_softmax(FIFO_score, FIFO_P, FIFO_l, FIFO_m, last_tile_KV);
+            compute_output(FIFO_m, FIFO_l, FIFO_P, FIFO_O_out, BRAM_m, BRAM_l, BRAM_O, BRAM_V, last_tile_KV);
         }
+        uint256_dt *Out_ptr = (uint256_dt*)&Out[i * tile_size];
+        store_tile_FIFO2HBM(FIFO_O_out, Out_ptr, last_tile_Q);
     }
 }
 
-void load_Q_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_Q,
-    int BRAM_Q[HEAD_DIM])
-{
-#pragma HLS INLINE off
-load_Q_local_row:
-    for (int i = 0; i < HEAD_DIM; i += 8)
-    {
-#pragma HLS PIPELINE II = 1
-        uint256_dt temp_chunk = FIFO_Q.read();
-    unpack_Q_loop:
-        for (int k = 0; k < 8; k++)
-        {
-#pragma HLS UNROLL
-            int start_bit = k * 32;
-            int end_bit = start_bit + 31;
-            BRAM_Q[i + k] = temp_chunk.range(end_bit, start_bit);
-        }
+#include <stdint.h>
+
+void load_tile_HBM2FIFO(
+    uint256_dt *HBM_ptr, 
+    hls::stream<uint256_dt> &FIFO_QKV,
+    bool last_tile
+){
+    #pragma HLS INLINE off
+
+    int valid_tokens = last_tile ? 5 : tile_size; 
+    int padding_tokens = tile_size - valid_tokens;
+    
+    int valid_chunks = valid_tokens * (HEAD_DIM / 8);
+    int padding_chunks = padding_tokens * (HEAD_DIM / 8);
+
+    load_valid_loop:
+    for (int i = 0; i < valid_chunks; i++) {
+        #pragma HLS PIPELINE II=1
+        FIFO_QKV.write(HBM_ptr[i]);
+    }
+    
+    load_padding_loop:
+    for(int i = 0; i < padding_chunks; i++){
+        #pragma HLS PIPELINE II=1
+
+        FIFO_QKV.write(0);
     }
 }
 
-void load_K_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_K,
-    int BRAM_K[HEAD_DIM])
+void load_QKV_FIFO2BRAM(
+    hls::stream<uint256_dt> &FIFO_QKV,
+    float BRAM_QKV[tile_size][HEAD_DIM]
+)
 {
-#pragma HLS INLINE off
-load_K_local_row:
-    for (int i = 0; i < HEAD_DIM; i += 8)
-    {
-#pragma HLS PIPELINE II = 1
-        uint256_dt temp_chunk = FIFO_K.read();
-    unpack_K_loop:
-        for (int k = 0; k < 8; k++)
-        {
-#pragma HLS UNROLL
-            int start_bit = k * 32;
-            int end_bit = start_bit + 31;
-            BRAM_K[i + k] = temp_chunk.range(end_bit, start_bit);
+    #pragma HLS INLINE off
+
+    union {
+        uint32_t i;
+        float f;
+    } converter;
+
+    load_QKV_local_row:
+    for (int i = 0; i < tile_size; i+=1) {
+        for(int j = 0; j < HEAD_DIM; j+=8) {
+            #pragma HLS PIPELINE II=1
+            
+            uint256_dt temp_chunk = FIFO_QKV.read();
+            
+            unpack_QKV_loop:
+            for (int k = 0; k < 8; k++) {
+                #pragma HLS UNROLL
+                int start_bit = k * 32;
+                int end_bit = start_bit + 31;
+                
+                converter.i = (uint32_t)temp_chunk.range(end_bit, start_bit);
+                
+                BRAM_QKV[i][j + k] = converter.f;
+            }
         }
     }
 }
 
 void compute_score(
-    hls::stream<uint256_dt> &FIFO_Q,
-    hls::stream<uint256_dt> &FIFO_K,
-    hls::stream<float> &FIFO_score)
-{
-#pragma HLS INLINE off
-    int BRAM_Q[HEAD_DIM];
-    int BRAM_K[HEAD_DIM];
-#pragma HLS ARRAY_PARTITION variable = BRAM_Q type = cyclic dim = 1 factor = 8
-#pragma HLS ARRAY_PARTITION variable = BRAM_K type = cyclic dim = 1 factor = 8
-compute_score_loop:
-    for (int i = 0; i < SEQ_LEN; i++)
-    {
-        load_Q_FIFO2BRAM(FIFO_Q, BRAM_Q);
-        for (int j = 0; j < SEQ_LEN; j++)
-        {
-            int sum = 0;
-            load_K_FIFO2BRAM(FIFO_K, BRAM_K);
-            for (int d = 0; d < HEAD_DIM; d += 16)
-            {
-#pragma HLS PIPELINE II = 1
-                int reg_Q[16];
-                int reg_K[16];
-#pragma HLS ARRAY_PARTITION variable = reg_Q complete
-#pragma HLS ARRAY_PARTITION variable = reg_K complete
-                for (int r = 0; r < 16; r++)
-                {
-#pragma HLS UNROLL factor = 16
-                    reg_Q[r] = BRAM_Q[d + r];
-                    reg_K[r] = BRAM_K[d + r];
+    float BRAM_Q[tile_size][HEAD_DIM],
+    float BRAM_K[tile_size][HEAD_DIM],
+    hls::stream<float> &FIFO_score
+){
+    #pragma HLS INLINE off
+    #pragma HLS ARRAY_PARTITION variable=BRAM_Q type=cyclic dim=2 factor=8
+    #pragma HLS ARRAY_PARTITION variable=BRAM_K type=cyclic dim=2 factor=8
+    
+    compute_i_loop:
+    for(int i = 0; i < tile_size; i++) {
+        compute_j_loop:
+        for (int j = 0; j < tile_size; j++) {
+            float sum = 0.0f; 
+            
+            compute_d_loop:
+            for (int d = 0; d < HEAD_DIM; d+=8) {
+                #pragma HLS PIPELINE II=1
+                float local_sum = 0.0f; 
+                
+                for(int k = 0; k < 8; k++) {
+                    #pragma HLS UNROLL factor=8
+                    local_sum += BRAM_Q[i][d + k] * BRAM_K[j][d + k];
                 }
-                for (int r = 0; r < 16; r++)
-                {
-#pragma HLS UNROLL factor = 16
-                    sum += reg_Q[r] * reg_K[r];
-                }
+                sum += local_sum;
             }
-            sum = sum >> 3;
-            float score = (float)sum;
+            float score = sum * 0.125f; 
+            
             FIFO_score.write(score);
         }
     }
@@ -333,100 +337,151 @@ load_V_local_row:
     }
 }
 
-void compute_attention_output(
-    hls::stream<float> &FIFO_softmax_out,
-    hls::stream<uint256_dt> &FIFO_V,
-    hls::stream<uint256_dt> &FIFO_Out)
-{
-#pragma HLS INLINE off
-    int BRAM_V[HEAD_DIM];
-    int BRAM_Out[HEAD_DIM];
-    float BRAM_acc_temp[HEAD_DIM];
-    float softmax_val;
-#pragma HLS ARRAY_PARTITION variable = BRAM_V type = cyclic dim = 1 factor = 16
-#pragma HLS ARRAY_PARTITION variable = BRAM_Out type = cyclic dim = 1 factor = 16
-#pragma HLS ARRAY_PARTITION variable = BRAM_acc_temp type = cyclic dim = 1 factor = 16
-#pragma HLS BIND_STORAGE variable = BRAM_V type = RAM_1P impl = LUTRAM
-#pragma HLS BIND_STORAGE variable = BRAM_Out type = RAM_1P impl = LUTRAM
-#pragma HLS BIND_STORAGE variable = BRAM_acc_temp type = RAM_2P impl = LUTRAM
-init_acc_loop:
-    for (int i = 0; i < HEAD_DIM; i += 16)
-    {
-#pragma HLS PIPELINE II = 1
-        for (int r = 0; r < 16; r++)
-        {
-#pragma HLS UNROLL factor = 16
-            BRAM_acc_temp[i + r] = 0.0f;
+void compute_output(
+    hls::stream<float> &FIFO_m,
+    hls::stream<float> &FIFO_l,
+    hls::stream<float> &FIFO_P,
+    hls::stream<uint256_dt> &FIFO_O_out,
+    float BRAM_m[tile_size],
+    float BRAM_l[tile_size],
+    float BRAM_O[tile_size][HEAD_DIM],
+    float BRAM_V[tile_size][HEAD_DIM],
+    bool last_tile
+){
+    #pragma HLS INLINE off
+    #pragma HLS ARRAY_PARTITION variable=BRAM_V type=cyclic dim=1 factor=8
+    #pragma HLS ARRAY_PARTITION variable=BRAM_O type=cyclic dim=2 factor=8
+
+    for(int i = 0; i < tile_size; i++) {
+        // Read incoming metadata for the current block
+        float m_ij = FIFO_m.read();
+        float l_ij = FIFO_l.read();
+        float m_i = BRAM_m[i];
+        float l_i = BRAM_l[i];
+        
+        // Compute new max and exponential scaling factors for Safe Softmax
+        float new_m_i = hls::max(m_i, m_ij);
+        float exp_diff_mi = hls::exp(m_i - new_m_i);
+        float exp_diff_mij = hls::exp(m_ij - new_m_i);
+        float new_l_i = exp_diff_mi * l_i + exp_diff_mij * l_ij;
+        
+        float p[tile_size];
+        #pragma HLS ARRAY_PARTITION variable=p type=cyclic dim=1 factor=8
+        
+        read_P_matrix:
+        for(int j = 0; j < tile_size; j+=1){
+            #pragma HLS PIPELINE II=1
+            p[j] = FIFO_P.read();
         }
+        
+        compute_output:
+        for(int j = 0; j < HEAD_DIM; j++){
+            float O_new = 0.0f;
+            for(int k = 0; k < tile_size; k+=8){
+                #pragma HLS PIPELINE II=1
+                float local_O_new = 0.0f;
+                for(int w = 0; w < 8; w++){
+                    #pragma HLS UNROLL factor=8
+                    // Matrix multiplication: P * V
+                    local_O_new += p[k+w] * BRAM_V[k+w][j];
+                }
+                O_new += local_O_new;
+            }
+            // Update O with scaling factors
+            BRAM_O[i][j] = (BRAM_O[i][j] * exp_diff_mi + O_new * exp_diff_mij);
+        }
+        
+        // Update states in BRAM
+        BRAM_m[i] = new_m_i;
+        BRAM_l[i] = new_l_i;
     }
-compute_attention_output_loop:
-    for (int i = 0; i < SEQ_LEN; i++)
-    {
-        for (int j = 0; j < SEQ_LEN; j++)
-        {
-            load_V_FIFO2BRAM(FIFO_V, BRAM_V);
-            softmax_val = FIFO_softmax_out.read();
-            for (int d = 0; d < HEAD_DIM; d += 16)
-            {
-#pragma HLS PIPELINE II = 1
-                int reg_V[16];
-#pragma HLS ARRAY_PARTITION variable = reg_V complete
-                for (int r = 0; r < 16; r++)
-                {
-#pragma HLS UNROLL factor = 16
-                    reg_V[r] = BRAM_V[d + r];
+
+    if(last_tile) {
+        uint256_dt O_256;
+        
+        // Union for bit-casting float to uint32_t 
+        union {
+            float f;
+            uint32_t i;
+        } converter;
+
+        pack_output_i_loop:
+        for(int i = 0; i < tile_size; i++) {
+            float final_l_i = BRAM_l[i]; 
+            
+            pack_output_j_loop:
+            for(int j = 0; j < HEAD_DIM; j += 8) {
+                #pragma HLS PIPELINE II=1
+                
+                pack_output_k_loop:
+                for(int k = 0; k < 8; k++) {
+                    #pragma HLS UNROLL factor=8
+                    int start_bit = k * 32;
+                    int end_bit = start_bit + 31;
+                    
+                    // Normalize the final output by dividing by the sum of exponentials (l_i)
+                    float normalized_O = BRAM_O[i][j + k] / final_l_i;
+                    
+                    // Bit-cast the float to unsigned integer for packing
+                    converter.f = normalized_O;
+                    O_256.range(end_bit, start_bit) = converter.i; 
                 }
-                for (int r = 0; r < 16; r++)
-                {
-#pragma HLS UNROLL factor = 16
-                    BRAM_acc_temp[d + r] += softmax_val * reg_V[r];
-                }
+                // Write the packed 256-bit word to the output FIFO
+                FIFO_O_out.write(O_256);
             }
         }
-        for (int d = 0; d < HEAD_DIM; d += 16)
-        {
-#pragma HLS PIPELINE II = 1
-            for (int r = 0; r < 16; r++)
-            {
-#pragma HLS UNROLL factor = 16
-                BRAM_Out[d + r] = (int)BRAM_acc_temp[d + r];
-                BRAM_acc_temp[d + r] = 0.0f;
-            }
-        }
-        store_output_BRAM2FIFO(BRAM_Out, FIFO_Out);
     }
 }
 
-void store_output_BRAM2FIFO(
-    int BRAM_Out[HEAD_DIM],
-    hls::stream<uint256_dt> &FIFO_Out)
-{
-#pragma HLS INLINE off
-store_output_loop:
-    for (int i = 0; i < HEAD_DIM; i += 8)
-    {
-#pragma HLS PIPELINE II = 1
-        uint256_dt temp_chunk;
-        for (int k = 0; k < 8; k++)
-        {
-#pragma HLS UNROLL
-            temp_chunk.range((k + 1) * 32 - 1, k * 32) = BRAM_Out[i + k];
+void store_tile_FIFO2HBM(
+    hls::stream<uint256_dt> &FIFO_O_out,
+    uint256_dt *HBM_ptr,
+    bool last_tile_Q 
+){
+    #pragma HLS INLINE off
+    
+    // Determine bounds to handle edge cases if the last tile is incomplete
+    int valid_tokens = last_tile_Q ? 5 : tile_size; 
+    int valid_chunks = valid_tokens * (HEAD_DIM / 8);
+    int total_chunks_in_fifo = tile_size * (HEAD_DIM / 8);
+
+    store_loop:
+    for (int i = 0; i < total_chunks_in_fifo; i++) {
+        #pragma HLS PIPELINE II=1
+        
+        // Read 256-bit packed float data from FIFO
+        uint256_dt temp = FIFO_O_out.read();
+        
+        // Only write valid data back to HBM memory
+        if (i < valid_chunks) {
+            HBM_ptr[i] = temp;
         }
-        FIFO_Out.write(temp_chunk);
     }
 }
 
-void store_result_FIFO2HBM(
-    hls::stream<uint256_dt> &FIFO_Out,
-    int Out[SEQ_LEN][HEAD_DIM])
-{
-#pragma HLS INLINE off
-    uint256_dt *Out_256_ptr = (uint256_dt *)Out;
-store_result_loop:
-    for (int i = 0; i < (SEQ_LEN * HEAD_DIM) / 8; i++)
-    {
-#pragma HLS PIPELINE II = 1
-        uint256_dt temp_chunk = FIFO_Out.read();
-        Out_256_ptr[i] = temp_chunk;
+void init_states(
+    float BRAM_m[tile_size],
+    float BRAM_l[tile_size],
+    float BRAM_O[tile_size][HEAD_DIM]
+){
+    #pragma HLS INLINE off
+    #pragma HLS ARRAY_PARTITION variable=BRAM_O type=cyclic dim=2 factor=8
+
+    init_loop:
+    for(int i = 0; i < tile_size; i++) {
+        // Initialize max value to a very small float number (effectively -infinity)
+        BRAM_m[i] = -1e30f; 
+        
+        // Initialize sum of exponentials to zero
+        BRAM_l[i] = 0.0f;   
+        
+        for(int j = 0; j < HEAD_DIM; j+=8) {
+            #pragma HLS PIPELINE II=1
+            for(int k = 0; k < 8; k++) {
+                #pragma HLS UNROLL factor=8
+                // Initialize Output matrix to zero
+                BRAM_O[i][j + k] = 0.0f;
+            }
+        }
     }
 }
