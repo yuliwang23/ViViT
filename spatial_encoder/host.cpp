@@ -37,6 +37,7 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <fstream>
 #include <iomanip>
 #include <cmath>
+#include <string>
 #include <vector>
 #include <chrono>
 
@@ -58,7 +59,7 @@ static_assert(EMBED_DIM % NUM_HEADS == 0, "embedding dimension must split evenly
 static_assert(MLP_DIM == 4 * EMBED_DIM, "spatial encoder MLP expansion must be 4x embedding dimension");
 
 // -----------------------------host side helper functions--------------------------------------
-// 初始化測試資料，例如 X、Wq、Wk、Wv、MLP_W1
+// ???????瞏貊?????????荔???????ｆ????????????? X???????????????????????????豯剖??W1
 // TODO: modify to load weight from quantized model, such as .bin
 static void init_random_int(int *data, size_t count, int min_value, int max_value)
 {
@@ -69,7 +70,7 @@ static void init_random_int(int *data, size_t count, int min_value, int max_valu
     }
 }
 // Modified from `posix_memalign`
-//  配置 4096-byte aligned host memory
+//  ????畾???? 4096-byte aligned host memory
 static void *host_aligned_alloc(size_t size_in_bytes)
 {
     void *ptr = nullptr;
@@ -79,7 +80,30 @@ static void *host_aligned_alloc(size_t size_in_bytes)
     }
     return ptr;
 }
-// TODO: 非在此實作，改成呼叫 HLS compile 出來的 kernel
+
+static bool load_txt_values_as_int(const string &filename, int *dst, size_t count)
+{
+    ifstream fin(filename);
+    if (!fin.is_open())
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < count; i++)
+    {
+        float value = 0.0f;
+        if (!(fin >> value))
+        {
+            cerr << "HOST-Error: Failed to parse value " << i << " from " << filename << endl;
+            return false;
+        }
+        dst[i] = static_cast<int>(roundf(value));
+    }
+
+    return true;
+}
+
+// TODO: not implement here
 static int gelu_int(int x)
 {
     float xf = static_cast<float>(x);
@@ -87,7 +111,7 @@ static int gelu_int(int x)
     return static_cast<int>(roundf(y));
 }
 
-// TODO: 非在此實作，改成呼叫 HLS compile 出來的 kernel
+//  TODO: not implement here
 static void layernorm_host(int in[SEQ_LEN][EMBED_DIM], int out[SEQ_LEN][EMBED_DIM])
 {
     const float eps = 1.0e-5f;
@@ -117,7 +141,7 @@ static void layernorm_host(int in[SEQ_LEN][EMBED_DIM], int out[SEQ_LEN][EMBED_DI
     }
 }
 
-// 把 12 個 head 的 attention output 接回 768 維：[12][197][64] -> [197][768]
+// [12][197][64] -> [197][768]
 static void concat_attention_heads(int attention_heads[NUM_HEADS][SEQ_LEN][HEAD_DIM],
                                    int attention_concat[SEQ_LEN][EMBED_DIM])
 {
@@ -127,7 +151,7 @@ static void concat_attention_heads(int attention_heads[NUM_HEADS][SEQ_LEN][HEAD_
                 attention_concat[i][h * HEAD_DIM + d] = attention_heads[h][i][d];
 }
 
-// TODO: 非在此實作，改成呼叫 HLS compile 出來的 kernel
+//  TODO: not implement here?
 static void residual_add(int a[SEQ_LEN][EMBED_DIM], int b[SEQ_LEN][EMBED_DIM], int out[SEQ_LEN][EMBED_DIM])
 {
     for (int i = 0; i < SEQ_LEN; i++)
@@ -135,7 +159,7 @@ static void residual_add(int a[SEQ_LEN][EMBED_DIM], int b[SEQ_LEN][EMBED_DIM], i
             out[i][d] = a[i][d] + b[i][d];
 }
 
-// TODO: 非在此實作，改成呼叫 HLS compile 出來的 kernel
+// TODO: not implement here
 static void mlp_host(int in[SEQ_LEN][EMBED_DIM],
                      int W1[EMBED_DIM][MLP_DIM], int b1[MLP_DIM],
                      int W2[MLP_DIM][EMBED_DIM], int b2[EMBED_DIM],
@@ -569,7 +593,7 @@ int main(int argc, char *argv[])
     //   o) Allocate Q/K/V, attention, MLP, and final output arrays
     //   o) Create Buffers in Global Memory to store FPGA data
     // ================================================================
-    // 配置 spatial encoder 需要的 host array
+    // ??????? spatial encoder ?????????? host array
     int (*X)[EMBED_DIM];
     int (*X_norm)[EMBED_DIM];
     int (*Wq)[EMBED_DIM];
@@ -604,7 +628,7 @@ int main(int argc, char *argv[])
     // ------------------------------------------------------------------
     void *ptr = nullptr;
     // TODO: check usage of `host_aligned_alloc` function.
-    // 配置記憶體
+    // ???????獢?????????????
     X = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(SEQ_LEN * EMBED_DIM * sizeof(int)));
     X_norm = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(SEQ_LEN * EMBED_DIM * sizeof(int)));
     Wq = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int)));
@@ -637,6 +661,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    // Keep the original random initialization flow for fallback/debug reference.
+    /*
     srand(0);
     init_random_int(&X[0][0], SEQ_LEN * EMBED_DIM, -2, 2);
     init_random_int(&Wq[0][0], EMBED_DIM * EMBED_DIM, -1, 1);
@@ -649,6 +675,37 @@ int main(int argc, char *argv[])
     init_random_int(MLP_b1, MLP_DIM, -1, 1);
     init_random_int(&MLP_W2[0][0], MLP_DIM * EMBED_DIM, -1, 1);
     init_random_int(MLP_b2, EMBED_DIM, -1, 1);
+    */
+
+    const string spatial_encoder_dir = "params/SpatialTransformer/encoderblock_0/";
+    const string x_input_file = "input_x.txt";
+
+    if (!load_txt_values_as_int(x_input_file, &X[0][0], SEQ_LEN * EMBED_DIM))
+    {
+        cout << endl
+             << "HOST-Error: Failed to load encoder input X from " << x_input_file << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    if (!load_txt_values_as_int(spatial_encoder_dir + "MultiHeadDotProductAttention_0_query_kernel_qvalue.txt", &Wq[0][0], EMBED_DIM * EMBED_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MultiHeadDotProductAttention_0_query_bias.txt", bq, EMBED_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MultiHeadDotProductAttention_0_key_kernel_qvalue.txt", &Wk[0][0], EMBED_DIM * EMBED_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MultiHeadDotProductAttention_0_key_bias.txt", bk, EMBED_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MultiHeadDotProductAttention_0_value_kernel_qvalue.txt", &Wv[0][0], EMBED_DIM * EMBED_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MultiHeadDotProductAttention_0_value_bias.txt", bv, EMBED_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MlpBlock_0_Dense_0_kernel_qvalue.txt", &MLP_W1[0][0], EMBED_DIM * MLP_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MlpBlock_0_Dense_0_bias.txt", MLP_b1, MLP_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MlpBlock_0_Dense_1_kernel_qvalue.txt", &MLP_W2[0][0], MLP_DIM * EMBED_DIM) ||
+        !load_txt_values_as_int(spatial_encoder_dir + "MlpBlock_0_Dense_1_bias.txt", MLP_b2, EMBED_DIM))
+    {
+        cout << endl
+             << "HOST-Error: Failed to load one or more SpatialTransformer encoderblock_0 parameter files" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    cout << "HOST-Info: Loaded spatial encoder input X from " << x_input_file << endl;
+    cout << "HOST-Info: Loaded Wq/bq/Wk/bk/Wv/bv/MLP weights from " << spatial_encoder_dir << endl;
     layernorm_host(X, X_norm);
 
     cout << endl;
@@ -796,7 +853,7 @@ int main(int argc, char *argv[])
     cout << "HOST-Info: Setting Kernel arguments ..." << endl;
 #endif
     errCode = false;
-    // 設定 QKV kernel arguments，對應 kernel 介面:linear_qkv_multihead(1,2,...9)
+    // ???????授???? QKV kernel arguments??????? kernel ?????:linear_qkv_multihead(1,2,...9)
     errCode |= clSetKernelArg(K_linear_qkv_multihead, 0, sizeof(cl_mem), &GlobMem_BUF_X);
     errCode |= clSetKernelArg(K_linear_qkv_multihead, 1, sizeof(cl_mem), &GlobMem_BUF_Wq);
     errCode |= clSetKernelArg(K_linear_qkv_multihead, 2, sizeof(cl_mem), &GlobMem_BUF_bq);
