@@ -1,4 +1,4 @@
-#include "layernorm.h"
+//#include "layernorm.h"
 #include <cstdlib>
 #include <cstdio>
 #include <iostream>
@@ -8,6 +8,14 @@
 #include <algorithm>
 
 using namespace std;
+
+constexpr int   SEQ_LEN       = 197;
+constexpr int   EMBED_DIM     = 768;
+constexpr int   NUM_ITERATIONS = 48;
+constexpr float EPSILON       = 1e-5f;
+constexpr float EMBED_DIM_INV = 1.0f / static_cast<float>(EMBED_DIM);
+
+typedef int8_t    int8_dt;
 
 // Golden model for software reference
 void layernorm_golden(float x[SEQ_LEN][EMBED_DIM],
@@ -110,16 +118,45 @@ int main() {
     printf("Running Software Golden Model...\n");
     layernorm_golden(X, gamma, beta, out_ref, SEQ_LEN, EMBED_DIM, EPSILON);
 
-    // 3. Run Hardware Optimized Model (HLS DUT)
-    printf("Running Hardware HLS Model...\n");
-    layernorm(X, gamma, beta, out_opt);
+    // 3. Load Hardware Output from file
+    printf("Loading Hardware HLS Output from file...\n");
+    {
+        ifstream infile("layernorm_output.txt");
+        if (!infile.is_open()) {
+            printf("ERROR: Could not open layernorm_output.txt\n");
+            return 1;
+        }
+        for (int i = 0; i < SEQ_LEN; i++)
+            for (int j = 0; j < EMBED_DIM; j++) {
+                int val;
+                if (!(infile >> val)) {
+                    printf("ERROR: Data mismatch in layernorm_output.txt at [%d][%d]\n", i, j);
+                    return 1;
+                }
+                out_opt[i][j] = static_cast<int8_dt>(val);
+            }
+        printf("  layernorm_output.txt loaded (%dx%d values)\n", SEQ_LEN, EMBED_DIM);
+    }
 
     // 4. Compare Results
     int max_err = 0;
     int error_count = 0;
     int tolerance = 1; // Allow +/- 1 difference due to float rounding and accumulator tree differences
 
-    printf("\n=== Detailed Comparison ===\n");
+    /*printf("\n=== Detailed Comparison ===\n");
+    printf("Pos [i, j]   | Ref | Opt | Diff\n");
+    printf("----------------------------------\n");*/
+    // Print first few samples for sanity check
+    printf("\n=== Sample Output (first 5 rows, first 8 cols) ===\n");
+    printf("Pos [i, j]   | Ref | Opt\n");
+    printf("----------------------------------\n");
+    for (int i = 0; i < 5; i++)
+        for (int j = 0; j < 8; j++)
+            printf("OUT [%3d, %3d] | %4d | %4d\n", i, j,
+                   static_cast<int>(out_ref[i][j]),
+                   static_cast<int>(out_opt[i][j]));
+
+    printf("\n=== Detailed Comparison (errors only) ===\n");
     printf("Pos [i, j]   | Ref | Opt | Diff\n");
     printf("----------------------------------\n");
 

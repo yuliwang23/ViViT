@@ -4,22 +4,25 @@ extern "C"{
 void layernorm(float x[SEQ_LEN][EMBED_DIM],
                float gamma[EMBED_DIM],
                float beta[EMBED_DIM],
-               int8_dt out[SEQ_LEN][EMBED_DIM]){
+               int8_dt out[SEQ_LEN][EMBED_DIM],
+               float scaler[SEQ_LEN]){
 #pragma HLS INTERFACE m_axi port=x offset=slave bundle=gmem0 max_widen_bitwidth=256
 #pragma HLS INTERFACE m_axi port=gamma offset=slave bundle=gmem0 max_widen_bitwidth=256
 #pragma HLS INTERFACE m_axi port=beta offset=slave bundle=gmem1 max_widen_bitwidth=256
 #pragma HLS INTERFACE m_axi port=out offset=slave bundle=gmem1 max_widen_bitwidth=256
+#pragma HLS INTERFACE m_axi port=scaler offset=slave bundle=gmem2 max_widen_bitwidth=256
 
 #pragma HLS INTERFACE s_axilite port=x bundle=control
 #pragma HLS INTERFACE s_axilite port=gamma bundle=control
 #pragma HLS INTERFACE s_axilite port=beta bundle=control
 #pragma HLS INTERFACE s_axilite port=out bundle=control
+#pragma HLS INTERFACE s_axilite port=scaler bundle=control
 #pragma HLS INTERFACE s_axilite port=return bundle=control
 
 static float SRAM_X[EMBED_DIM];
 static float SRAM_gamma[EMBED_DIM];
 static float SRAM_beta[EMBED_DIM];
-static float scaler[SEQ_LEN]; // To store the scale factor for potential use in later layers
+//static float scaler[SEQ_LEN]; // To store the scale factor for potential use in later layers
 static int8_dt SRAM_out[EMBED_DIM];
 hls::stream<uint256_dt> FIFO_X;
 hls::stream<uint256_dt> FIFO_out;
@@ -170,10 +173,10 @@ void compute_mean_variance(
             #pragma HLS UNROLL
             int idx = j + k;
             float scaled_val = norm_buffer[idx] * scale; 
-            *scaler = scale; // Store the scale factor for potential use in later layers
             out[idx] = static_cast<int8_dt>(scaled_val); 
         }
     }
+    *scaler = 1/scale; // Store the scale factor for potential use in later layers
 }
 
 void store_out_BRAM2FIFO(

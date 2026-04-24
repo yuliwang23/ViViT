@@ -2,16 +2,20 @@
 
 extern "C"{
 void linear_qkv_multihead(
-    int X[SEQ_LEN][EMBED_DIM],
-    int Wq[EMBED_DIM][EMBED_DIM],
-    int bq[EMBED_DIM],
-    int Wk[EMBED_DIM][EMBED_DIM],
-    int bk[EMBED_DIM],
-    int Wv[EMBED_DIM][EMBED_DIM],
-    int bv[EMBED_DIM],
-    int Q[NUM_HEADS][SEQ_LEN][HEAD_DIM],
-    int K[NUM_HEADS][SEQ_LEN][HEAD_DIM],
-    int V[NUM_HEADS][SEQ_LEN][HEAD_DIM])
+    int8_t X[SEQ_LEN][EMBED_DIM],
+    int8_t Wq[EMBED_DIM][EMBED_DIM],
+    int8_t bq[EMBED_DIM],
+    int8_t Wk[EMBED_DIM][EMBED_DIM],
+    int8_t bk[EMBED_DIM],
+    int8_t Wv[EMBED_DIM][EMBED_DIM],
+    int8_t bv[EMBED_DIM], //INT8
+    float scale_input,    // 來自前一層 LayerNorm 的量化因子
+    float scale_wq,       // Wq 的量化因子
+    float scale_wk,       // Wk 的量化因子
+    float scale_wv,       // Wv 的量化因子
+    float Q[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+    float K[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+    float V[NUM_HEADS][SEQ_LEN][HEAD_DIM]) //FP32
 {
 // input buffer declaration
 static int BRAM_X[SEQ_LEN][EMBED_DIM];
