@@ -59,7 +59,6 @@ static_assert(EMBED_DIM % NUM_HEADS == 0, "embedding dimension must split evenly
 static_assert(MLP_DIM == 4 * EMBED_DIM, "spatial encoder MLP expansion must be 4x embedding dimension");
 
 // -----------------------------host side helper functions--------------------------------------
-// ??????????è²????????????????????ï½?????????????? X???????????????????????????è±¯å????W1
 // TODO: modify to load weight from quantized model, such as .bin
 static void init_random_int(int *data, size_t count, int min_value, int max_value)
 {
@@ -70,7 +69,7 @@ static void init_random_int(int *data, size_t count, int min_value, int max_valu
     }
 }
 // Modified from `posix_memalign`
-//  ??????????? 4096-byte aligned host memory
+//  allocate 4096-byte aligned host memory
 static void *host_aligned_alloc(size_t size_in_bytes)
 {
     void *ptr = nullptr;
