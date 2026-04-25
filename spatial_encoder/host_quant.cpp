@@ -1203,6 +1203,21 @@ int main(int argc, char *argv[])
     layernorm_host(After_Attention_Residual, MLP_Input);
     mlp_host(MLP_Input, MLP_W1, MLP_b1, MLP_W2, MLP_b2, MLP_Output);
     residual_add(After_Attention_Residual, MLP_Output, Spatial_Encoder_Output);
+    // SpatialTransformer layernorm_host()
+    
+    // ============Temporal Encoder================
+    // fix dim. & Temporal embedding
+    // layer_norm
+    // Attention
+    // residual add
+    // layer_norm
+    // MLP
+    //residule
+    // ============================================
+    // layer norm
+    // output projection --> result
+    
+
     auto Host_Post_End = chrono::high_resolution_clock::now();
     double Host_Post_Time_ms = chrono::duration<double, std::milli>(Host_Post_End - Host_Post_Start).count();
 
