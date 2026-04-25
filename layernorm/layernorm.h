@@ -1,13 +1,4 @@
-/*#include <fstream>
-#include <iostream>
-#include <iomanip>
-#include <cstdlib>
-#include <ap_int.h>
-#include <hls_stream.h>
-#include <cmath>
-#include <array>
-#include <cfloat>
-
+/*
 // LUT for 1/k where k = 1 to N 
 //(nB/nAB)
 template <int N>
@@ -42,70 +33,9 @@ struct M2WeightLUT {
     }
 };
 
-constexpr int NUM_ITERATIONS = 48;
-
 //constexpr MeanWeightLUT<NUM_ITERATIONS> MEAN_WT;
 //constexpr M2WeightLUT<NUM_ITERATIONS>   M2_WT;
-
-
-constexpr int SEQ_LEN = 197; // 14*14*16 --> per frame // 14*15
-constexpr int EMBED_DIM = 768;
-constexpr float EPSILON = 1e-5;
-constexpr float EMBED_DIM_INV = 1.0f / EMBED_DIM;
-typedef ap_uint<256> uint256_dt;
-typedef ap_int<8> int8_dt;
-
-// 這裡一定要加 extern "C"，確保 C++ Name Mangling 不會干擾 Vitis 尋找頂層函數
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-void layernorm(
-    float x[SEQ_LEN][EMBED_DIM],
-    float gamma[EMBED_DIM],
-    float beta[EMBED_DIM],
-    int8_dt out[SEQ_LEN][EMBED_DIM]
-);
-
-#ifdef __cplusplus
-}
-#endif
-
-void load_weights_HBM2SRAM(
-    float HBM_gamma[EMBED_DIM],
-    float HBM_beta[EMBED_DIM],
-    float SRAM_gamma[EMBED_DIM],
-    float SRAM_beta[EMBED_DIM]
-);
-
-void load_X_HBM2FIFO(
-    float X[EMBED_DIM],
-    hls::stream<uint256_dt> &FIFO_X
-);
-
-void load_X_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_X,
-    float BRAM_X[EMBED_DIM]
-);
-
-void compute_mean_variance(
-    float BRAM_X[EMBED_DIM],
-    float gamma[EMBED_DIM],
-    float beta[EMBED_DIM],
-    float *scaler,
-    int8_dt out[EMBED_DIM]
-);
-
-void store_out_BRAM2FIFO(
-    int8_dt out_BRAM[EMBED_DIM],
-    hls::stream<uint256_dt> &FIFO_out
-);
-
-void store_out_FIFO2HBM(
-    hls::stream<uint256_dt> &FIFO_out,
-    int8_dt Output_Global[EMBED_DIM] 
-);*/
-#pragma once
+*/
 
 #include <fstream>
 #include <iostream>
@@ -117,9 +47,6 @@ void store_out_FIFO2HBM(
 #include <array>
 #include <cfloat>
 
-// ============================================================
-// Constants
-// ============================================================
 constexpr int   SEQ_LEN       = 197;
 constexpr int   EMBED_DIM     = 768;
 constexpr int   NUM_ITERATIONS = 48;
@@ -129,10 +56,8 @@ constexpr float EMBED_DIM_INV = 1.0f / static_cast<float>(EMBED_DIM);
 typedef ap_uint<256> uint256_dt;
 typedef ap_int<8>    int8_dt;
 
-// ============================================================
-// ✅ 改成 static const float array，Vitis parser 完全相容
+// 改成 static const float array，Vitis parser 完全相容
 // MEAN_WT[i] = 1/(i+1)
-// ============================================================
 static const float MEAN_WT[NUM_ITERATIONS] = {
     1.0f/1,  1.0f/2,  1.0f/3,  1.0f/4,  1.0f/5,  1.0f/6,
     1.0f/7,  1.0f/8,  1.0f/9,  1.0f/10, 1.0f/11, 1.0f/12,
@@ -144,9 +69,7 @@ static const float MEAN_WT[NUM_ITERATIONS] = {
     1.0f/43, 1.0f/44, 1.0f/45, 1.0f/46, 1.0f/47, 1.0f/48
 };
 
-// ============================================================
-// ✅ M2_WT[i] = 16*i/(i+1)
-// ============================================================
+// M2_WT[i] = 16*i/(i+1)
 static const float M2_WT[NUM_ITERATIONS] = {
     0.0f,
     16.0f*1/2,  16.0f*2/3,  16.0f*3/4,  16.0f*4/5,  16.0f*5/6,
@@ -161,15 +84,14 @@ static const float M2_WT[NUM_ITERATIONS] = {
     16.0f*46/47,16.0f*47/48
 };
 
-// ============================================================
-// Function Declarations
-// ============================================================
+
 extern "C" {
 void layernorm(
-    float    x[SEQ_LEN][EMBED_DIM],
-    float    gamma[EMBED_DIM],
-    float    beta[EMBED_DIM],
-    int8_dt  out[SEQ_LEN][EMBED_DIM]
+    float x[SEQ_LEN][EMBED_DIM],
+    float gamma[EMBED_DIM],
+    float beta[EMBED_DIM],
+    int8_dt out[SEQ_LEN][EMBED_DIM],
+    float scaler[SEQ_LEN]
 );
 }
 
