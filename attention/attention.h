@@ -20,47 +20,39 @@ constexpr float scale = 0.125;
 constexpr int VEC_MAX = SEQ_LEN;
 constexpr int tile_size = 16;
 
-// ================= Top =================
-extern "C"
-{
-    void attention_opt(
-        int Q[SEQ_LEN][HEAD_DIM],
-        int K[SEQ_LEN][HEAD_DIM],
-        int V[SEQ_LEN][HEAD_DIM],
-        int Out[SEQ_LEN][HEAD_DIM]);
-}
 
-// ================= Load Q/K/V =================
-void load_Q_HBM2FIFO(
-    int Q[SEQ_LEN][HEAD_DIM],
-    hls::stream<uint256_dt> &FIFO_Q);
+void attention_opt(
+    float Q[SEQ_LEN][HEAD_DIM],
+    float K[SEQ_LEN][HEAD_DIM],
+    float V[SEQ_LEN][HEAD_DIM],
+    float Out[SEQ_LEN][HEAD_DIM]);
 
-void load_K_HBM2FIFO(
-    int K[SEQ_LEN][HEAD_DIM],
-    hls::stream<uint256_dt> &FIFO_K);
+// Initialize state BRAMs (m, l, O) for a new Q tile
+void init_states(
+    float BRAM_m[tile_size],
+    float BRAM_l[tile_size],
+    float BRAM_O[tile_size][HEAD_DIM]
+);
 
-void load_V_HBM2FIFO(
-    int V[SEQ_LEN][HEAD_DIM],
-    hls::stream<uint256_dt> &FIFO_V);
+// Load a single tile of Q, K, or V from HBM to FIFO with padding logic
+void load_tile_HBM2FIFO(
+    uint256_dt *HBM_ptr, 
+    hls::stream<uint256_dt> &FIFO_QKV,
+    bool last_tile
+);
 
-// ================= FIFO ??? BRAM =================
-void load_Q_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_Q,
-    int BRAM_Q[HEAD_DIM]);
-
-void load_K_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_K,
-    int BRAM_K[HEAD_DIM]);
-
-void load_V_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_V,
-    int BRAM_V[HEAD_DIM]);
+// Unpack 256-bit chunks from FIFO and store them into local BRAM
+void load_QKV_FIFO2BRAM(
+    hls::stream<uint256_dt> &FIFO_QKV,
+    float BRAM_QKV[tile_size][HEAD_DIM]
+);
 
 // ================= Score =================
 void compute_score(
-    hls::stream<uint256_dt> &FIFO_Q,
-    hls::stream<uint256_dt> &FIFO_K,
-    hls::stream<float> &FIFO_score);
+    float BRAM_Q[tile_size][HEAD_DIM],
+    float BRAM_K[tile_size][HEAD_DIM],
+    hls::stream<float> &FIFO_score
+);
 
 // ================= Softmax =================
 void load_score_FIFO2BRAM(
@@ -91,19 +83,24 @@ void compute_softmax(
     hls::stream<float> &FIFO_score,
     hls::stream<float> &FIFO_softmax_out);
 
-// ================= Attention Output =================
-void compute_attention_output(
-    hls::stream<float> &FIFO_softmax_out,
-    hls::stream<uint256_dt> &FIFO_V,
-    hls::stream<uint256_dt> &FIFO_Out);
+// Update unnormalized Output and defer division until the last tile
+void compute_output(
+    hls::stream<float> &FIFO_m,
+    hls::stream<float> &FIFO_l,
+    hls::stream<float> &FIFO_P,
+    hls::stream<uint256_dt> &FIFO_O_out,
+    float BRAM_m[tile_size],
+    float BRAM_l[tile_size],
+    float BRAM_O[tile_size][HEAD_DIM],
+    float BRAM_V[tile_size][HEAD_DIM],
+    bool last_tile
+);
 
-void store_output_BRAM2FIFO(
-    int BRAM_Out[HEAD_DIM],
-    hls::stream<uint256_dt> &FIFO_Out);
-
-// ================= Store =================
-void store_result_FIFO2HBM(
-    hls::stream<uint256_dt> &FIFO_Out,
-    int Out[SEQ_LEN][HEAD_DIM]);
+// Store the finalized and padded Output tile from FIFO back to HBM
+void store_tile_FIFO2HBM(
+    hls::stream<uint256_dt> &FIFO_O_out,
+    uint256_dt *HBM_ptr,
+    bool last_tile_Q 
+);
 
 #endif // ATTENTION_H
