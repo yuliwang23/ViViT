@@ -59,7 +59,6 @@ static_assert(EMBED_DIM % NUM_HEADS == 0, "embedding dimension must split evenly
 static_assert(MLP_DIM == 4 * EMBED_DIM, "spatial encoder MLP expansion must be 4x embedding dimension");
 
 // -----------------------------host side helper functions--------------------------------------
-// ???????æ½¸ç?????????¯ï???????¢î????????????? X???????????????????????????îµ­å??W1
 // TODO: modify to load weight from quantized model, such as .bin
 static void init_random_int(int *data, size_t count, int min_value, int max_value)
 {
@@ -70,7 +69,7 @@ static void init_random_int(int *data, size_t count, int min_value, int max_valu
     }
 }
 // Modified from `posix_memalign`
-//  ????æ®???? 4096-byte aligned host memory
+//  allocate 4096-byte aligned host memory
 static void *host_aligned_alloc(size_t size_in_bytes)
 {
     void *ptr = nullptr;
@@ -627,8 +626,7 @@ int main(int argc, char *argv[])
     // Step 4.1: Allocate and initialize spatial encoder arrays
     // ------------------------------------------------------------------
     void *ptr = nullptr;
-    // TODO: check usage of `host_aligned_alloc` function.
-    // ???????æ¡?????????????
+    // config memory
     X = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(SEQ_LEN * EMBED_DIM * sizeof(int)));
     X_norm = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(SEQ_LEN * EMBED_DIM * sizeof(int)));
     Wq = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int)));
@@ -853,7 +851,7 @@ int main(int argc, char *argv[])
     cout << "HOST-Info: Setting Kernel arguments ..." << endl;
 #endif
     errCode = false;
-    // ???????±Â???? QKV kernel arguments??????? kernel ?????:linear_qkv_multihead(1,2,...9)
+    // ?????????????? QKV kernel arguments??????? kernel ?????:linear_qkv_multihead(1,2,...9)
     errCode |= clSetKernelArg(K_linear_qkv_multihead, 0, sizeof(cl_mem), &GlobMem_BUF_X);
     errCode |= clSetKernelArg(K_linear_qkv_multihead, 1, sizeof(cl_mem), &GlobMem_BUF_Wq);
     errCode |= clSetKernelArg(K_linear_qkv_multihead, 2, sizeof(cl_mem), &GlobMem_BUF_bq);
