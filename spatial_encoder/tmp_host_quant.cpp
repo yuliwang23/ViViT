@@ -1016,7 +1016,7 @@ int main(int argc, char *argv[])
             CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode);
         
         // ===================== 以下可拿掉 =======================
-
+        /*
         // ---------------- Q ----------------
         region.origin = f * frame_size_QKV;
         region.size   = frame_size_QKV;
@@ -1044,7 +1044,7 @@ int main(int argc, char *argv[])
         GlobMem_BUF_frame_Attention_Out[f] = clCreateSubBuffer(
             GlobMem_BUF_Attention_Out, CL_MEM_READ_WRITE,
             CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode);
-
+        */
         // ---------------- error check ----------------
         if (errCode != CL_SUCCESS)
         {
@@ -1295,19 +1295,23 @@ int main(int argc, char *argv[])
             }
 
             cl_mem GlobMem_BUF_head_Q[FRAME * NUM_HEADS] = {NULL};
-            cl_mem GlobMem_BUF_head_K[NUM_HEADS] = {NULL};
-            cl_mem GlobMem_BUF_head_V[NUM_HEADS] = {NULL};
-            cl_mem GlobMem_BUF_head_Out[NUM_HEADS] = {NULL};
+            cl_mem GlobMem_BUF_head_K[FRAME * NUM_HEADS] = {NULL};
+            cl_mem GlobMem_BUF_head_V[FRAME * NUM_HEADS] = {NULL};
+            cl_mem GlobMem_BUF_head_Out[FRAME * NUM_HEADS] = {NULL};
             const size_t HEAD_BYTES = SEQ_LEN * HEAD_DIM * sizeof(float);
+            const size_t HEAD_BYTES_INT = SEQ_LEN * HEAD_DIM * sizeof(int);
 
             for (int h = 0; h < NUM_HEADS; h++)
             {
-                cl_buffer_region head_region;
+                cl_buffer_region head_region, head_region_int;
                 int idx = frame * NUM_HEADS + h;
                 head_region.origin = static_cast<size_t>(idx) * HEAD_BYTES;
                 head_region.size = HEAD_BYTES;
+                head_region_int.origin = static_cast<size_t>(idx) * HEAD_BYTES_INT;
+                head_region_int.size = HEAD_BYTES_INT;
 
-                // TODO: FLAG is right ?
+                // TODO: FLAG is right?
+                // TODO: QKV can be set as INT? (right now is FLOAT)
                 GlobMem_BUF_head_Q[idx] = clCreateSubBuffer(GlobMem_BUF_Q, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode);
                 if (errCode != CL_SUCCESS)
                     return EXIT_FAILURE;
@@ -1317,7 +1321,8 @@ int main(int argc, char *argv[])
                 GlobMem_BUF_head_V[idx] = clCreateSubBuffer(GlobMem_BUF_V, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode);
                 if (errCode != CL_SUCCESS)
                     return EXIT_FAILURE;
-                GlobMem_BUF_head_Out[idx] = clCreateSubBuffer(GlobMem_BUF_Attention_Out, CL_MEM_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode);
+                // notice that GlobMem_BUF_Attention_Out is INT
+                GlobMem_BUF_head_Out[idx] = clCreateSubBuffer(GlobMem_BUF_Attention_Out, CL_MEM_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region_int, &errCode);
                 if (errCode != CL_SUCCESS)
                     return EXIT_FAILURE;
 
