@@ -1338,6 +1338,7 @@ int main(int argc, char *argv[])
             errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, LayerNorm_Input_Buffers, 0, 0, NULL, &Mem_op_event[0]);
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[1]);
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 9, QKV_Input_Buffers, 0, 0, NULL, &Mem_op_event[2]);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, NULL);
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * NUM_HEADS], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
             if (errCode != CL_SUCCESS)
             {
@@ -1475,7 +1476,8 @@ int main(int argc, char *argv[])
             }
             clWaitForEvents(1, &Mem_op_event[7]);
 
-            mlp_quant_host(X_norm, GlobMem_BUF_frame_LayerNorm_Scaler, MLP_W1, MLP_b1, MLP_scale_w1, MLP_W2, MLP_b2, MLP_scale_w2, MLP_Output);
+            // TODO: check host opertation to single frame
+            mlp_quant_host(X_norm, LayerNorm_scaler, MLP_W1, MLP_b1, MLP_scale_w1, MLP_W2, MLP_b2, MLP_scale_w2, MLP_Output);
             residual_add(After_Attention_Residual, MLP_Output, Spatial_Encoder_Output);
             copy_int_to_float(Spatial_Encoder_Output, X);
 
