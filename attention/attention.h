@@ -1,6 +1,5 @@
 #ifndef ATTENTION_H
 #define ATTENTION_H
-
 #include <fstream>
 #include <iostream>
 #include <iomanip>
@@ -9,19 +8,18 @@
 #include <hls_stream.h>
 #include <hls_math.h>
 #include <cmath>
-
+// #define MAX(a, b) ((a) > (b) ? (a) : (b))
 typedef ap_uint<256> uint256_dt;
-
-constexpr int SEQ_LEN = 14 * 14 + 1;
+constexpr int SEQ_LEN = 14 * 14 + 1; // 14*14*16
 constexpr int EMBED_DIM = 768;
 constexpr int NUM_HEADS = 12;
 constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS;
-constexpr float scale = 0.125;
+constexpr float scale = 0.125; // for Base param. (FE_B_HEAD_DIM = 64)
 constexpr int VEC_MAX = SEQ_LEN;
-constexpr int tile_size = 16;
+constexpr int tile_size = 16; 
+constexpr int num_tiles = 13;
 
-
-void attention_opt(
+extern "C" void attention_opt(
     float Q[SEQ_LEN][HEAD_DIM],
     float K[SEQ_LEN][HEAD_DIM],
     float V[SEQ_LEN][HEAD_DIM],
@@ -47,41 +45,27 @@ void load_QKV_FIFO2BRAM(
     float BRAM_QKV[tile_size][HEAD_DIM]
 );
 
-// ================= Score =================
+// Compute Attention Score (S = Q * K^T)
 void compute_score(
     float BRAM_Q[tile_size][HEAD_DIM],
     float BRAM_K[tile_size][HEAD_DIM],
     hls::stream<float> &FIFO_score
 );
 
-// ================= Softmax =================
+// Load computed scores from stream to local BRAM for softmax processing
 void load_score_FIFO2BRAM(
     hls::stream<float> &FIFO_score,
-    float BRAM_score[SEQ_LEN + 11]);
+    float BRAM_score[tile_size][tile_size]
+);
 
-void compute_max(
-    float BRAM_score[SEQ_LEN + 11],
-    float &max_score);
-
-void compute_sum_exp(
-    float BRAM_score[SEQ_LEN + 11],
-    float max_score,
-    float &sum_exp);
-
-void compute_softmax_output(
-    float BRAM_score[SEQ_LEN + 11],
-    float max_score,
-    float sum_exp,
-    hls::stream<float> &FIFO_softmax_out);
-
-void compute_softmax_one_dim(
-    hls::stream<float> &FIFO_score,
-    float BRAM_score[SEQ_LEN + 11],
-    hls::stream<float> &FIFO_softmax_out);
-
+// Compute FlashAttention-2 online softmax parameters (max and sum of exp)
 void compute_softmax(
     hls::stream<float> &FIFO_score,
-    hls::stream<float> &FIFO_softmax_out);
+    hls::stream<float> &FIFO_P,
+    hls::stream<float> &FIFO_l,
+    hls::stream<float> &FIFO_m,
+    bool last_tile
+);
 
 // Update unnormalized Output and defer division until the last tile
 void compute_output(
