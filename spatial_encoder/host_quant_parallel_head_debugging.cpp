@@ -1258,6 +1258,7 @@ int main(int argc, char *argv[])
 
         for (int frame = 0; frame < FRAME; frame++)
         {
+            cout << "running block " << block << ", frame " << frame << endl;
             for (int h = 0; h < NUM_HEADS; h++)
             {
                 cl_buffer_region head_region, head_region_int;
@@ -1351,7 +1352,8 @@ int main(int argc, char *argv[])
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[1]);
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 9, QKV_Input_Buffers, 0, 0, NULL, &Mem_op_event[2]);
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, NULL);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * SEQ_LEN], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * NUM_HEADS], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
+            // origin error: errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * SEQ_LEN], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -1535,6 +1537,7 @@ int main(int argc, char *argv[])
             cout << "-----clEnqueueMigrateMemObjects LayerNorm inout buffer-----\n";
 			// ================================================
 
+            
 
             errCode = clEnqueueTask(Command_Queue, K_layernorm, 2, layernorm1_wait_list2, &K_exe_event[2]);
             if (errCode != CL_SUCCESS)
@@ -1544,6 +1547,22 @@ int main(int argc, char *argv[])
                     << endl;
                 return EXIT_FAILURE;
             }
+
+            // ================ fix error temporary	===========
+			clGetEventInfo(K_exe_event[2], CL_EVENT_COMMAND_EXECUTION_STATUS,
+			               sizeof(status), &status, NULL);
+			cout << "wait_SecondLayerNorm_finish: ";
+			switch(status) {
+			    case CL_QUEUED:    printf("QUEUED\n"); break;
+			    case CL_SUBMITTED: printf("SUBMITTED\n"); break;
+			    case CL_RUNNING:   printf("RUNNING\n"); break;
+			    case CL_COMPLETE:  printf("COMPLETE\n"); break;
+			    default:           printf("ERROR: %d\n", status); break;
+			}
+
+
+            cout << "-----get ready to compute LayerNorm1-----\n";
+            // ================================================
 
 
             //cl_event ln1_to_host_wait_list[] = {K_exe_event[2 + NUM_HEADS * FRAME]};
