@@ -943,9 +943,9 @@ int main(int argc, char* argv[])
     // Step 6.1: Store output Results to files
     //   輸出格式：[NUM_HEADS][SEQ_LEN] 行，每行 HEAD_DIM 個 float（空格分隔）
     // ------------------------------------------------------
-    const char* Q_File_Name = "Q_output.txt";
-    const char* K_File_Name = "K_output.txt";
-    const char* V_File_Name = "V_output.txt";
+    const char* Q_File_Name = "output_Q.txt";
+    const char* K_File_Name = "output_K.txt";
+    const char* V_File_Name = "output_V.txt";
 
     auto write_output_float = [&](const char* fname, float* buf) -> bool {
         fstream f(fname, ios::out);
