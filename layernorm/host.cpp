@@ -41,11 +41,17 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using namespace std;
 
 #include <CL/cl.h>
+#include <CL/cl_ext_xilinx.h>   // Changed: added for XCL_MEM_TOPOLOGY (HBM bank binding)
 
 #include "help_functions.h"
 #include "layernorm.h"  // Changed: include layernorm header
 
 #define ALL_MESSAGES
+
+// Changed: HBM bank index definitions, must match connectivity.cfg sp= settings
+#define HBM_BANK0  (0 | XCL_MEM_TOPOLOGY)   // gmem0: x, gamma
+#define HBM_BANK2  (2 | XCL_MEM_TOPOLOGY)   // gmem1: beta, out
+#define HBM_BANK4  (4 | XCL_MEM_TOPOLOGY)   // gmem2: scaler
 
 // ********************************************************************************** //
 // ---------------------------------------------------------------------------------- //
@@ -368,7 +374,7 @@ int main(int argc, char* argv[])
 	// Step 4: Prepare Data to Run Kernel
 	// ================================================================
 	//   o) Allocate and initialize input arrays: x, gamma, beta
-	//   o) Allocate Memory to store the results: out array
+	//   o) Allocate Memory to store the results: out array, scaler array  // Changed: added scaler
 	//   o) Create Buffers in Global Memory to store data
 	// ================================================================
 
@@ -376,10 +382,12 @@ int main(int argc, char* argv[])
 	// x[SEQ_LEN][EMBED_DIM]: float input
 	// gamma[EMBED_DIM], beta[EMBED_DIM]: float weights
 	// out[SEQ_LEN][EMBED_DIM]: int8_dt output
+	// scaler[SEQ_LEN]: float output  // Changed: added scaler
 	float  (*x_in)[EMBED_DIM];
 	float  *gamma_in;
 	float  *beta_in;
 	int8_t (*out_data)[EMBED_DIM];
+	float  *scaler_out;  // Changed: added scaler output
 
 	#ifdef ALL_MESSAGES
 	cout << endl;
@@ -466,25 +474,46 @@ int main(int argc, char* argv[])
 	out_data = reinterpret_cast<int8_t(*)[EMBED_DIM]>(ptr);
 	cout << "Done (" << SEQ_LEN << "x" << EMBED_DIM << " elements)" << endl;
 
+	// Changed: Allocate scaler: [SEQ_LEN]
+	cout << "HOST-Info: Allocating memory for scaler ... ";
+	if (posix_memalign(&ptr, 4096, SEQ_LEN * sizeof(float))) {
+		cout << endl << "HOST-Error: Out of Memory for scaler array" << endl;
+		return EXIT_FAILURE;
+	}
+	scaler_out = reinterpret_cast<float*>(ptr);
+	cout << "Done (" << SEQ_LEN << " elements)" << endl;
+
     cout << endl;
 
 	// ------------------------------------------------------------------
 	// Step 4.2: Create Buffers in Global Memory to store data
-	//             o) GlobMem_BUF_x     - stores x     (R)
-	//             o) GlobMem_BUF_gamma - stores gamma (R)
-	//             o) GlobMem_BUF_beta  - stores beta  (R)
-	//             o) GlobMem_BUF_out   - stores out   (W)
+	//             o) GlobMem_BUF_x      - stores x      (R)
+	//             o) GlobMem_BUF_gamma  - stores gamma  (R)
+	//             o) GlobMem_BUF_beta   - stores beta   (R)
+	//             o) GlobMem_BUF_out    - stores out    (W)
+	//             o) GlobMem_BUF_scaler - stores scaler (W)  // Changed: added scaler
 	// ------------------------------------------------------------------
 	#ifdef ALL_MESSAGES
 	cout << "HOST-Info: Allocating buffers in Global Memory to store Input and Output Data ..." << endl;
 	#endif
-	// Changed: four buffers for x, gamma, beta, out
+
+	// Changed: added HBM bank binding via cl_mem_ext_ptr_t for all buffers
+	cl_mem_ext_ptr_t ext_x, ext_gamma, ext_beta, ext_out, ext_scaler;
+	ext_x.flags      = HBM_BANK0;  ext_x.obj      = x_in;       ext_x.param      = 0;
+	ext_gamma.flags  = HBM_BANK0;  ext_gamma.obj  = gamma_in;   ext_gamma.param  = 0;
+	ext_beta.flags   = HBM_BANK2;  ext_beta.obj   = beta_in;    ext_beta.param   = 0;
+	ext_out.flags    = HBM_BANK2;  ext_out.obj    = out_data;   ext_out.param    = 0;
+	ext_scaler.flags = HBM_BANK4;  ext_scaler.obj = scaler_out; ext_scaler.param = 0;
+
+	// Changed: four buffers for x, gamma, beta, out, scaler
 	cl_mem GlobMem_BUF_x, GlobMem_BUF_gamma, GlobMem_BUF_beta, GlobMem_BUF_out;
+	cl_mem GlobMem_BUF_scaler;  // Changed: added scaler buffer
 
 	// Allocate Global Memory for GlobMem_BUF_x
 	// .......................................................
-	GlobMem_BUF_x = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
-		SEQ_LEN * EMBED_DIM * sizeof(float), x_in, &errCode);
+	GlobMem_BUF_x = clCreateBuffer(Context,
+		CL_MEM_READ_ONLY | CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR,  // Changed: added HBM flags
+		SEQ_LEN * EMBED_DIM * sizeof(float), &ext_x, &errCode);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_x" << endl << endl;
 		return EXIT_FAILURE;
@@ -492,8 +521,9 @@ int main(int argc, char* argv[])
 
 	// Allocate Global Memory for GlobMem_BUF_gamma
 	// .......................................................
-	GlobMem_BUF_gamma = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
-		EMBED_DIM * sizeof(float), gamma_in, &errCode);
+	GlobMem_BUF_gamma = clCreateBuffer(Context,
+		CL_MEM_READ_ONLY | CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR,  // Changed: added HBM flags
+		EMBED_DIM * sizeof(float), &ext_gamma, &errCode);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_gamma" << endl << endl;
 		return EXIT_FAILURE;
@@ -501,8 +531,9 @@ int main(int argc, char* argv[])
 
 	// Allocate Global Memory for GlobMem_BUF_beta
 	// .......................................................
-	GlobMem_BUF_beta = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
-		EMBED_DIM * sizeof(float), beta_in, &errCode);
+	GlobMem_BUF_beta = clCreateBuffer(Context,
+		CL_MEM_READ_ONLY | CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR,  // Changed: added HBM flags
+		EMBED_DIM * sizeof(float), &ext_beta, &errCode);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_beta" << endl << endl;
 		return EXIT_FAILURE;
@@ -510,10 +541,21 @@ int main(int argc, char* argv[])
 
 	// Allocate Global Memory for GlobMem_BUF_out
 	// .......................................................
-	GlobMem_BUF_out = clCreateBuffer(Context, CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR,
-		SEQ_LEN * EMBED_DIM * sizeof(int8_t), out_data, &errCode);
+	GlobMem_BUF_out = clCreateBuffer(Context,
+		CL_MEM_WRITE_ONLY | CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR,  // Changed: added HBM flags
+		SEQ_LEN * EMBED_DIM * sizeof(int8_t), &ext_out, &errCode);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_out" << endl << endl;
+		return EXIT_FAILURE;
+	}
+
+	// Changed: Allocate Global Memory for GlobMem_BUF_scaler
+	// .......................................................
+	GlobMem_BUF_scaler = clCreateBuffer(Context,
+		CL_MEM_WRITE_ONLY | CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR,
+		SEQ_LEN * sizeof(float), &ext_scaler, &errCode);
+	if (errCode != CL_SUCCESS) {
+		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_scaler" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
@@ -527,15 +569,16 @@ int main(int argc, char* argv[])
 	//			 	 layernorm	1		GlobMem_BUF_gamma
 	//			 	 layernorm	2		GlobMem_BUF_beta
 	//			 	 layernorm	3		GlobMem_BUF_out
+	//			 	 layernorm	4		GlobMem_BUF_scaler  // Changed: added scaler
 	// 				----------------------------------------------------
 	//         o) Copy Input Data from Host to Global Memory
 	//         o) Submit Kernels for Execution
 	//         o) Copy Results from Global Memory to Host
 	// ============================================================================
-	int Nb_Of_Mem_Events = 4;
+	int Nb_Of_Mem_Events = 5;  // Changed: 4 → 5 (added scaler migrate)
 	int Nb_Of_Exe_Events = 1;
 
-	cl_event Mem_op_event[Nb_Of_Mem_Events];
+	cl_event Mem_op_event[5];  // Changed: 4 → 5
 	cl_event K_exe_event[Nb_Of_Exe_Events];
 
 
@@ -555,11 +598,12 @@ int main(int argc, char* argv[])
 	#endif
 	errCode  = false;
 
-	// Changed: set arguments for layernorm kernel (x, gamma, beta, out)
+	// Changed: set arguments for layernorm kernel (x, gamma, beta, out, scaler)
 	errCode |= clSetKernelArg(K_layernorm, 0, sizeof(cl_mem), &GlobMem_BUF_x);
 	errCode |= clSetKernelArg(K_layernorm, 1, sizeof(cl_mem), &GlobMem_BUF_gamma);
 	errCode |= clSetKernelArg(K_layernorm, 2, sizeof(cl_mem), &GlobMem_BUF_beta);
 	errCode |= clSetKernelArg(K_layernorm, 3, sizeof(cl_mem), &GlobMem_BUF_out);
+	errCode |= clSetKernelArg(K_layernorm, 4, sizeof(cl_mem), &GlobMem_BUF_scaler);  // Changed: added scaler
 
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-ERROR: Failed to set Kernel arguments" << endl << endl;
@@ -599,6 +643,13 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 
+	// Changed: Migrate scaler output buffer without content
+	errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_scaler, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[4]);
+	if (errCode != CL_SUCCESS) {
+		cout << endl << "Host-Error: Failed Migrate GlobMem_BUF_scaler without migrating content" << endl << endl;
+		return EXIT_FAILURE;
+	}
+
 	// --------------------------------------------------------
 	errCode = clEnqueueBarrierWithWaitList(Command_Queue, 0, NULL, NULL);
 	if (errCode != CL_SUCCESS) {
@@ -625,12 +676,19 @@ int main(int argc, char* argv[])
 	cout << "HOST_Info: Submitting Copy Results data from Global Memory to Host ..." << endl;
 	#endif
 
-	cl_event Mem_read_event[1];
+	cl_event Mem_read_event[2];  // Changed: 1 → 2 (added scaler read-back)
 
 	// Changed: read back GlobMem_BUF_out
 	errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_out, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[0], &Mem_read_event[0]);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to submit Copy Results from GlobMem_BUF_out to out_data" << endl << endl;
+		return EXIT_FAILURE;
+	}
+
+	// Changed: read back GlobMem_BUF_scaler
+	errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_scaler, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[0], &Mem_read_event[1]);
+	if (errCode != CL_SUCCESS) {
+		cout << endl << "Host-Error: Failed to submit Copy Results from GlobMem_BUF_scaler to scaler_out" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
@@ -653,10 +711,12 @@ int main(int argc, char* argv[])
 	// ------------------------------------------------------
 	// Step 6.1: Store output Results to files
 	// ------------------------------------------------------
-	// Changed: output filename and data type (int8_t cast to int for readability)
-	char Out_File_Name[] = "layernorm_output.txt";
+	// Changed: output_out.txt  - one int8 per line (verify_output_layernorm.cpp compatible)
+	//          output_scaler.txt - one float per line
+	char Out_File_Name[]    = "output_out.txt";
+	char Scaler_File_Name[] = "output_scaler.txt";  // Changed: added scaler output file
 	
-	cout << "HOST_Info: Store layernorm output results in: " << Out_File_Name << endl;
+	cout << "HOST_Info: Store layernorm out results in: " << Out_File_Name << endl;
 	fstream Out_File;
 	Out_File.open(Out_File_Name, ios::out);
 	if (!Out_File.is_open()) {
@@ -665,11 +725,24 @@ int main(int argc, char* argv[])
 	}
 	for (int i = 0; i < SEQ_LEN; i++) {
 		for (int d = 0; d < EMBED_DIM; d++) {
-			Out_File << static_cast<int>(out_data[i][d]) << " ";  // cast int8_t to int for text output
+			Out_File << static_cast<int>(out_data[i][d]) << "\n";  // Changed: one value per line
 		}
-		Out_File << endl;
 	}
 	Out_File.close();
+
+	// Changed: write scaler output, one float per line
+	cout << "HOST_Info: Store layernorm scaler results in: " << Scaler_File_Name << endl;
+	fstream Scaler_File;
+	Scaler_File.open(Scaler_File_Name, ios::out);
+	if (!Scaler_File.is_open()) {
+		cout << endl << "HOST-Error: Failed to open the " << Scaler_File_Name << " file for write" << endl << endl;
+		return EXIT_FAILURE;
+	}
+	Scaler_File << fixed << setprecision(9);
+	for (int i = 0; i < SEQ_LEN; i++) {
+		Scaler_File << scaler_out[i] << "\n";
+	}
+	Scaler_File.close();
 
 	// ------------------------------------------------------
 	// Step 6.2: Check correctness of the output results
@@ -699,13 +772,14 @@ int main(int argc, char* argv[])
 
 	for (int i = 0; i < Nb_Of_Mem_Events; i++) clReleaseEvent(Mem_op_event[i]);
 	for (int i = 0; i < Nb_Of_Exe_Events; i++) clReleaseEvent(K_exe_event[i]);
-	for (int i = 0; i < 1; i++) clReleaseEvent(Mem_read_event[i]);
+	for (int i = 0; i < 2; i++) clReleaseEvent(Mem_read_event[i]);  // Changed: 1 → 2
 
 	// Changed: release layernorm buffers
 	clReleaseMemObject(GlobMem_BUF_x);
 	clReleaseMemObject(GlobMem_BUF_gamma);
 	clReleaseMemObject(GlobMem_BUF_beta);
 	clReleaseMemObject(GlobMem_BUF_out);
+	clReleaseMemObject(GlobMem_BUF_scaler);  // Changed: added scaler release
 
 	// Changed: release layernorm kernel
 	clReleaseKernel(K_layernorm);
@@ -721,6 +795,7 @@ int main(int argc, char* argv[])
 	free(gamma_in);
 	free(beta_in);
 	free(out_data);
+	free(scaler_out);  // Changed: added scaler free
 
 	cout << endl << "HOST-Info: DONE" << endl << endl;
 

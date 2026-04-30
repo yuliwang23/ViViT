@@ -1305,6 +1305,7 @@ int main(int argc, char *argv[])
 
         for (int frame = 0; frame < FRAME; frame++)
         {
+            cout << "running block " << block << ", frame " << frame << endl;
             for (int h = 0; h < NUM_HEADS; h++)
             {
                 cl_buffer_region head_region, head_region_out;
@@ -1608,7 +1609,7 @@ int main(int argc, char *argv[])
 
             clGetEventInfo(Mem_op_event[6], CL_EVENT_COMMAND_EXECUTION_STATUS,
                            sizeof(status), &status, NULL);
-            cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] Mem_op_event[6] status: ";
+            cout << "Mem_op_event[6]: ";
             switch (status)
             {
             case CL_QUEUED:
@@ -1627,7 +1628,7 @@ int main(int argc, char *argv[])
                 printf("ERROR: %d\n", status);
                 break;
             }
-            cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] LN1 input/output buffers migrated" << endl;
+            cout << "-----clEnqueueMigrateMemObjects LayerNorm inout buffer-----\n";
             // ================================================
 
             errCode = clEnqueueTask(Command_Queue, K_layernorm, 2, layernorm1_wait_list2, &K_exe_event[2]);
@@ -1642,7 +1643,7 @@ int main(int argc, char *argv[])
             // ================ fix error temporary	===========
             clGetEventInfo(K_exe_event[2], CL_EVENT_COMMAND_EXECUTION_STATUS,
                            sizeof(status), &status, NULL);
-            cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] wait_SecondLayerNorm_finish status: ";
+            cout << "wait_SecondLayerNorm_finish: ";
             switch (status)
             {
             case CL_QUEUED:
@@ -1662,7 +1663,7 @@ int main(int argc, char *argv[])
                 break;
             }
 
-            cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] preparing LN1 device stage" << endl;
+            cout << "-----get ready to compute LayerNorm1-----\n";
             // ================================================
 
             // cl_event ln1_to_host_wait_list[] = {K_exe_event[2 + NUM_HEADS * FRAME]};
