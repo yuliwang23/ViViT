@@ -1,4 +1,5 @@
 /*#include <fstream>
+/*#include <fstream>
 #include <iostream>
 #include <iomanip>
 #include <cstdlib>
@@ -50,20 +51,20 @@ void weight_streamer(
 );
 
 void load_X_HBM2FIFO(
-    int8_t X[SEQ_LEN][EMBED_DIM], 
+    int8_t X[SEQ_LEN][EMBED_DIM],
     hls::stream<uint256_dt> &FIFO_X);
 void load_X_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_X, 
+    hls::stream<uint256_dt> &FIFO_X,
     int8_t BRAM_X[SEQ_LEN][EMBED_DIM]);
 
 void load_Weight_tile_HBM2FIFO(
-    int8_t W[EMBED_DIM][EMBED_DIM], 
+    int8_t W[EMBED_DIM][EMBED_DIM],
     hls::stream<uint256_dt> &FIFO_W,
     int row_offset,
     int col_offset);
 
 void load_Weight_tile_FIFO2BRAM(
-    hls::stream<uint256_dt> &FIFO_W, 
+    hls::stream<uint256_dt> &FIFO_W,
     int8_t BRAM_W[TILE_SIZE][TILE_SIZE]);
 
 void load_Scale_Input_HBM2BRAM(

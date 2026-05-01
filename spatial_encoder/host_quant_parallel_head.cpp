@@ -761,32 +761,32 @@ int main(int argc, char *argv[])
     //   o) Create Buffers in Global Memory to store FPGA data
     // ================================================================
     // allocate host memory for spatial encoder input, weights, and outputs
-    float (*X)[EMBED_DIM];                // FRAME * SEQ_LEN * EMBED_DIM
+    float (*X)[EMBED_DIM]; // FRAME * SEQ_LEN * EMBED_DIM
 
     // model params
-    float *LayerNorm_gamma;               // EMBED_DIM
-    float *LayerNorm_beta;                // EMBED_DIM
-    int8_t (*Wq)[EMBED_DIM];              // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM) 
-    float *bq;                            // HEAD_NUM * HEAD_DIM
-    float *scale_wq;                      // HEAD_NUM * HEAD_DIM
-    int8_t (*Wk)[EMBED_DIM];              // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM) 
-    float *bk;                            // HEAD_NUM * HEAD_DIM
-    float *scale_wk;                      // HEAD_NUM * HEAD_DIM
-    int8_t (*Wv)[EMBED_DIM];              // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM) 
-    float *bv;                            // HEAD_NUM * HEAD_DIM
-    float *scale_wv;                      // HEAD_NUM * HEAD_DIM
+    float *LayerNorm_gamma;  // EMBED_DIM
+    float *LayerNorm_beta;   // EMBED_DIM
+    int8_t (*Wq)[EMBED_DIM]; // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM)
+    float *bq;               // HEAD_NUM * HEAD_DIM
+    float *scale_wq;         // HEAD_NUM * HEAD_DIM
+    int8_t (*Wk)[EMBED_DIM]; // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM)
+    float *bk;               // HEAD_NUM * HEAD_DIM
+    float *scale_wk;         // HEAD_NUM * HEAD_DIM
+    int8_t (*Wv)[EMBED_DIM]; // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM)
+    float *bv;               // HEAD_NUM * HEAD_DIM
+    float *scale_wv;         // HEAD_NUM * HEAD_DIM
     // attention ouput projection weight
-    int8_t (*Wout)[EMBED_DIM];            // EMBED_DIM * EMBED_DIM (NUM_HEADS * HEAD_DIM * EMBED_DIM) 
-    float *bout;                          // HEAD_NUM * HEAD_DIM
-    float *scale_wout;                    // HEAD_NUM * HEAD_DIM
-    float *LayerNorm1_gamma;              // EMBED_DIM
-    float *LayerNorm1_beta;               // EMBED_DIM
-    int8_t (*MLP_W1)[MLP_DIM];            // EMBED_DIM * MLP_DIM
-    float *MLP_b1;                        // MLP_DIM
-    float *MLP_scale_w1;                  // MLP_DIM
-    int8_t (*MLP_W2)[EMBED_DIM];          // MLP_DIM * EMBED_DIM 
-    float *MLP_b2;                        // EMBED_DIM
-    float *MLP_scale_w2;                  // EMBED_DIM
+    int8_t (*Wout)[EMBED_DIM];   // EMBED_DIM * EMBED_DIM (NUM_HEADS * HEAD_DIM * EMBED_DIM)
+    float *bout;                 // HEAD_NUM * HEAD_DIM
+    float *scale_wout;           // HEAD_NUM * HEAD_DIM
+    float *LayerNorm1_gamma;     // EMBED_DIM
+    float *LayerNorm1_beta;      // EMBED_DIM
+    int8_t (*MLP_W1)[MLP_DIM];   // EMBED_DIM * MLP_DIM
+    float *MLP_b1;               // MLP_DIM
+    float *MLP_scale_w1;         // MLP_DIM
+    int8_t (*MLP_W2)[EMBED_DIM]; // MLP_DIM * EMBED_DIM
+    float *MLP_b2;               // EMBED_DIM
+    float *MLP_scale_w2;         // EMBED_DIM
 
     // intermediate value
     float *LayerNorm_scaler;                    // FRAME * SEQ_LEN
@@ -802,7 +802,6 @@ int main(int argc, char *argv[])
     int (*MLP_Output)[EMBED_DIM];               // FRAME * SEQ_LEN * EMBED_DIM
     int (*Spatial_Encoder_Output)[EMBED_DIM];   // FRAME * SEQ_LEN * EMBED_DIM
 
-
 #ifdef ALL_MESSAGES
     cout << endl;
     cout << "HOST-Info: ============================================================= " << endl;
@@ -816,7 +815,7 @@ int main(int argc, char *argv[])
     void *ptr = nullptr;
     // config memory
     X = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(float)));
-    
+
     LayerNorm_gamma = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
     LayerNorm_beta = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
     Wq = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int8_t)));
@@ -852,7 +851,6 @@ int main(int argc, char *argv[])
     MLP_Input = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
     MLP_Output = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
     Spatial_Encoder_Output = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
-    
 
     if (!X || !LayerNorm_gamma || !LayerNorm_beta || !X_norm || !LayerNorm_scaler ||
         !Wq || !bq || !scale_wq || !Wk || !bk || !scale_wk || !Wv || !bv || !scale_wv ||
@@ -883,7 +881,7 @@ int main(int argc, char *argv[])
     init_random_int(MLP_b2, EMBED_DIM, -1, 1);
     */
     // TODO: change input X file
-    const string x_input_file = "input_x.txt";
+    const string x_input_file = "vivit_video_input_AfterConvAndEmbedding/input_x.txt";
 
     if (!load_txt_values_as_float(x_input_file, &X[0][0], FRAME * SEQ_LEN * EMBED_DIM))
     {
@@ -915,18 +913,18 @@ int main(int argc, char *argv[])
 #endif
 
     // buffer relative to X
-    cl_mem GlobMem_BUF_X, GlobMem_BUF_X_norm, GlobMem_BUF_Attention_Out, 
+    cl_mem GlobMem_BUF_X, GlobMem_BUF_X_norm, GlobMem_BUF_Attention_Out,
         GlobMem_BUF_LayerNorm_Scaler, GlobMem_BUF_Q, GlobMem_BUF_K, GlobMem_BUF_V;
-    
+
     cl_mem GlobMem_BUF_frame_X[FRAME], GlobMem_BUF_frame_X_norm[FRAME], GlobMem_BUF_frame_LayerNorm_Scaler[FRAME];
 
-    //cl_mem  GlobMem_BUF_frame_Q[FRAME], GlobMem_BUF_frame_K[FRAME], GlobMem_BUF_frame_V[FRAME], GlobMem_BUF_frame_Attention_Out[FRAME];
+    // cl_mem  GlobMem_BUF_frame_Q[FRAME], GlobMem_BUF_frame_K[FRAME], GlobMem_BUF_frame_V[FRAME], GlobMem_BUF_frame_Attention_Out[FRAME];
 
     cl_mem GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta,
         GlobMem_BUF_Wq, GlobMem_BUF_bq, GlobMem_BUF_scale_wq,
         GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_scale_wk,
         GlobMem_BUF_Wv, GlobMem_BUF_bv, GlobMem_BUF_scale_wv;
-    
+
     GlobMem_BUF_X = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * EMBED_DIM * sizeof(float), X, &errCode);
     if (errCode != CL_SUCCESS)
     {
@@ -985,38 +983,38 @@ int main(int argc, char *argv[])
     }
     // ================================================
     //                  Ceate SubBuffer
-    // ================================================ 
-    size_t frame_size_X              = SEQ_LEN * EMBED_DIM * sizeof(float);
-    size_t frame_size_X_norm         = SEQ_LEN * EMBED_DIM * sizeof(int8_t);
-    size_t frame_size_scaler         = SEQ_LEN * sizeof(float);
-    size_t frame_size_QKV            = NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float);
-    size_t frame_size_Attention_Out  = NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(int);
+    // ================================================
+    size_t frame_size_X = SEQ_LEN * EMBED_DIM * sizeof(float);
+    size_t frame_size_X_norm = SEQ_LEN * EMBED_DIM * sizeof(int8_t);
+    size_t frame_size_scaler = SEQ_LEN * sizeof(float);
+    size_t frame_size_QKV = NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float);
+    size_t frame_size_Attention_Out = NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(int);
     for (int f = 0; f < FRAME; f++)
     {
         cl_buffer_region region;
 
         // ---------------- X ----------------
         region.origin = f * frame_size_X;
-        region.size   = frame_size_X;
+        region.size = frame_size_X;
         GlobMem_BUF_frame_X[f] = clCreateSubBuffer(
             GlobMem_BUF_X, CL_MEM_READ_ONLY,
             CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode);
 
         // ---------------- X_norm ----------------
         region.origin = f * frame_size_X_norm;
-        region.size   = frame_size_X_norm;
+        region.size = frame_size_X_norm;
         GlobMem_BUF_frame_X_norm[f] = clCreateSubBuffer(
             GlobMem_BUF_X_norm, CL_MEM_READ_WRITE,
             CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode);
 
         // ---------------- LayerNorm scaler ----------------
         region.origin = f * frame_size_scaler;
-        region.size   = frame_size_scaler;
+        region.size = frame_size_scaler;
         GlobMem_BUF_frame_LayerNorm_Scaler[f] = clCreateSubBuffer(
             GlobMem_BUF_LayerNorm_Scaler, CL_MEM_READ_WRITE,
             CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode);
-        
-        // ===================== ä»¥ä¸‹å¯æ‹¿æŽ‰ =======================
+
+        // ===================== ä»¥ä????¯æ?¿æ?? =======================
         /*
         // ---------------- Q ----------------
         region.origin = f * frame_size_QKV;
@@ -1054,9 +1052,6 @@ int main(int argc, char *argv[])
         }
     }
 
-
-
-    
     // ref: clCreateBuffer method
     // https://www.cnblogs.com/willhua/p/9463515.html
     // https://zhuanlan.zhihu.com/p/684133601
@@ -1077,8 +1072,7 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
-    
-    
+
     GlobMem_BUF_Wq = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * EMBED_DIM * sizeof(int8_t), Wq, &errCode);
     if (errCode != CL_SUCCESS)
     {
@@ -1151,8 +1145,6 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
-    
-    
 
     // ============================================================================
     // Step 5: Run 12 Spatial Transformer encoder blocks in sequence
@@ -1213,7 +1205,7 @@ int main(int argc, char *argv[])
     {
         const string spatial_encoder_dir = "params/SpatialTransformer/encoderblock_" + to_string(block) + "/";
         cout << "HOST-Info: Loading parameters for encoder block " << block << " from " << spatial_encoder_dir << endl;
-        
+
         // loading weight per block
         if (!load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_0_scale.txt", LayerNorm_gamma, EMBED_DIM) ||
             !load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_0_bias.txt", LayerNorm_beta, EMBED_DIM) ||
@@ -1239,8 +1231,8 @@ int main(int argc, char *argv[])
             !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_1_kernel_scale.txt", MLP_scale_w2, EMBED_DIM))
         {
             cout << endl
-                << "HOST-Error: Failed to load one or more parameter files for encoder block " << block << endl
-                << endl;
+                 << "HOST-Error: Failed to load one or more parameter files for encoder block " << block << endl
+                 << endl;
             return EXIT_FAILURE;
         }
 
@@ -1290,7 +1282,7 @@ int main(int argc, char *argv[])
 
             // ========================== create subbuffer for KQV finish ===================================
 
-            // setting kenel Args 
+            // setting kenel Args
 
             cl_mem LayerNorm_Input_Buffers[] = {
                 GlobMem_BUF_frame_X[frame], GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta};
@@ -1330,18 +1322,17 @@ int main(int argc, char *argv[])
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "Host-ERROR: Failed to set LN0/QKV kernel arguments for block " << block << endl
-                    << endl;
+                     << "Host-ERROR: Failed to set LN0/QKV kernel arguments for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
-            
 
             // ------------------------------------------------------
             // Step 5.2: Copy Input Data from Host to Global Memory
             // ------------------------------------------------------
             // move LayerNorm Args to Device
             // move LayerNorm Output buffer to Device (TODO: is it useless?)
-            // move Weight params to linear_qkv_multihead 
+            // move Weight params to linear_qkv_multihead
             // move Attention Output buffer to Device (TODO: is it useless?)
             // ------------------------------------------------------
             errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, LayerNorm_Input_Buffers, 0, 0, NULL, &Mem_op_event[0]);
@@ -1352,8 +1343,8 @@ int main(int argc, char *argv[])
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "Host-Error: Failed to migrate LN0/QKV buffers for block " << block << endl
-                    << endl;
+                     << "Host-Error: Failed to migrate LN0/QKV buffers for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
 
@@ -1365,8 +1356,8 @@ int main(int argc, char *argv[])
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "HOST-Error: Failed to submit LN0 layernorm for block " << block << endl
-                    << endl;
+                     << "HOST-Error: Failed to submit LN0 layernorm for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
 
@@ -1375,13 +1366,11 @@ int main(int argc, char *argv[])
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "HOST-Error: Failed to submit linear_qkv_multihead for block " << block << endl
-                    << endl;
+                     << "HOST-Error: Failed to submit linear_qkv_multihead for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
 
-                
-            
             for (int h = 0; h < NUM_HEADS; h++)
             {
                 int idx = frame * NUM_HEADS + h;
@@ -1394,8 +1383,8 @@ int main(int argc, char *argv[])
                 if (errCode != CL_SUCCESS)
                 {
                     cout << endl
-                        << "Host-ERROR: Failed to set attention kernel arguments for frame: "<< frame << ", block: " << block << ", head: " << h << endl
-                        << endl;
+                         << "Host-ERROR: Failed to set attention kernel arguments for frame: " << frame << ", block: " << block << ", head: " << h << endl
+                         << endl;
                     return EXIT_FAILURE;
                 }
                 // setting K_attention_opt Args
@@ -1405,8 +1394,8 @@ int main(int argc, char *argv[])
                 if (errCode != CL_SUCCESS)
                 {
                     cout << endl
-                        << "HOST-Error: Failed to submit attention for frame: "<< frame << ", block: " << block << ", head: " << h << endl
-                        << endl;
+                         << "HOST-Error: Failed to submit attention for frame: " << frame << ", block: " << block << ", head: " << h << endl
+                         << endl;
                     return EXIT_FAILURE;
                 }
             }
@@ -1418,13 +1407,12 @@ int main(int argc, char *argv[])
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "Host-Error: Failed to copy attention output to host for block " << block << endl
-                    << endl;
+                     << "Host-Error: Failed to copy attention output to host for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
             // must wait for all attention block finish and move data back to host
             clWaitForEvents(1, &Mem_op_event[4]);
-
 
             auto Host_Post_Start = chrono::high_resolution_clock::now();
 
@@ -1450,8 +1438,8 @@ int main(int argc, char *argv[])
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "Host-ERROR: Failed to set LN1 kernel arguments for block " << block << endl
-                    << endl;
+                     << "Host-ERROR: Failed to set LN1 kernel arguments for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
 
@@ -1460,42 +1448,42 @@ int main(int argc, char *argv[])
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "Host-Error: Failed to migrate LN1 buffers for block " << block << endl
-                    << endl;
+                     << "Host-Error: Failed to migrate LN1 buffers for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
-            
+
             cl_event layernorm1_wait_list[] = {Mem_op_event[5], Mem_op_event[6]};
             errCode = clEnqueueTask(Command_Queue, K_layernorm, 2, layernorm1_wait_list, &K_exe_event[2]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "HOST-Error: Failed to submit LN1 layernorm for block " << block << endl
-                    << endl;
+                     << "HOST-Error: Failed to submit LN1 layernorm for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
 
-            //cl_event ln1_to_host_wait_list[] = {K_exe_event[2 + NUM_HEADS * FRAME]};
+            // cl_event ln1_to_host_wait_list[] = {K_exe_event[2 + NUM_HEADS * FRAME]};
 
             // TODO: is it useless?
             errCode = clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[2], &Mem_op_event[7]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                    << "Host-Error: Failed to copy LN1 output to host for block " << block << endl
-                    << endl;
+                     << "Host-Error: Failed to copy LN1 output to host for block " << block << endl
+                     << endl;
                 return EXIT_FAILURE;
             }
             clWaitForEvents(1, &Mem_op_event[7]);
 
-            // TODO: check host opertation to single frame 
+            // TODO: check host opertation to single frame
             mlp_quant_host(X_norm, LayerNorm_scaler, MLP_W1, MLP_b1, MLP_scale_w1, MLP_W2, MLP_b2, MLP_scale_w2, MLP_Output);
             residual_add(After_Attention_Residual, MLP_Output, Spatial_Encoder_Output);
             copy_int_to_float(Spatial_Encoder_Output, X);
-            
+
             auto Host_Post_End = chrono::high_resolution_clock::now();
             Host_Post_Time_ms += chrono::duration<double, std::milli>(Host_Post_End - Host_Post_Mid).count();
-            
+
             // Host event control
             for (int i = 0; i < Nb_Of_Mem_Events; i++)
             {
@@ -1568,7 +1556,7 @@ int main(int argc, char *argv[])
         {
             for (int d = 0; d < EMBED_DIM; d++)
             {
-                //Output_File << Spatial_Encoder_Output[i][d] << " ";
+                // Output_File << Spatial_Encoder_Output[i][d] << " ";
                 Output_File << X[f * SEQ_LEN + i][d] << " ";
             }
             Output_File << endl;
@@ -1632,7 +1620,6 @@ int main(int argc, char *argv[])
     clReleaseMemObject(GlobMem_BUF_K);
     clReleaseMemObject(GlobMem_BUF_V);
 
-    
     clReleaseKernel(K_layernorm);
     clReleaseKernel(K_linear_qkv_multihead);
     for (int h = 0; h < NUM_HEADS; h++)
