@@ -159,17 +159,17 @@ int main()
 
     // ---- 讀 input ----
     printf("=== Loading inputs ===\n");
-    if (!read_int8 ("input_X.txt",           &X[0][0],   SEQ_LEN * EMBED_DIM))    return 1;
-    if (!read_int8 ("input_Wq.txt",          &Wq[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
-    if (!read_int8 ("input_Wk.txt",          &Wk[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
-    if (!read_int8 ("input_Wv.txt",          &Wv[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
-    if (!read_float("input_bq.txt",          bq,          EMBED_DIM))             return 1;
-    if (!read_float("input_bk.txt",          bk,          EMBED_DIM))             return 1;
-    if (!read_float("input_bv.txt",          bv,          EMBED_DIM))             return 1;
-    if (!read_float("input_scale_input.txt", scale_input, SEQ_LEN))               return 1;
-    if (!read_float("input_scale_wq.txt",    scale_wq,    EMBED_DIM))             return 1;
-    if (!read_float("input_scale_wk.txt",    scale_wk,    EMBED_DIM))             return 1;
-    if (!read_float("input_scale_wv.txt",    scale_wv,    EMBED_DIM))             return 1;
+    if (!read_int8 ("X.txt",           &X[0][0],   SEQ_LEN * EMBED_DIM))    return 1;
+    if (!read_int8 ("Wq.txt",          &Wq[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
+    if (!read_int8 ("Wk.txt",          &Wk[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
+    if (!read_int8 ("Wv.txt",          &Wv[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
+    if (!read_float("bq.txt",          bq,          EMBED_DIM))             return 1;
+    if (!read_float("bk.txt",          bk,          EMBED_DIM))             return 1;
+    if (!read_float("bv.txt",          bv,          EMBED_DIM))             return 1;
+    if (!read_float("scale_input.txt", scale_input, SEQ_LEN))               return 1;
+    if (!read_float("scale_wq.txt",    scale_wq,    EMBED_DIM))             return 1;
+    if (!read_float("scale_wk.txt",    scale_wk,    EMBED_DIM))             return 1;
+    if (!read_float("scale_wv.txt",    scale_wv,    EMBED_DIM))             return 1;
 
     // ---- 軟體黃金模型 ----
     printf("\n=== Running software golden model ===\n");

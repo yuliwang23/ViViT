@@ -129,3 +129,21 @@ void store_out_FIFO2HBM(
     hls::stream<uint256_dt> &FIFO_out,
     int8_dt Output_Global[EMBED_DIM]
 );
+
+void load_X_HBM2FIFO_all(
+    float x[SEQ_LEN][EMBED_DIM],
+    hls::stream<uint256_dt> &FIFO_X
+);
+
+void compute_all(
+    hls::stream<uint256_dt> &FIFO_X,
+    float scaler[SEQ_LEN],
+    float SRAM_gamma[EMBED_DIM],
+    float SRAM_beta[EMBED_DIM],
+    hls::stream<uint256_dt> &FIFO_out
+);
+
+void store_out_FIFO2HBM_all(
+    hls::stream<uint256_dt> &FIFO_out,
+    int8_dt out[SEQ_LEN][EMBED_DIM]
+);
