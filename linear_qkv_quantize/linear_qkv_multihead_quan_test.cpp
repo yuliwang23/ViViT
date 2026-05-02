@@ -160,9 +160,9 @@ int main()
     // ---- 讀 input ----
     printf("=== Loading inputs ===\n");
     if (!read_int8 ("X.txt",           &X[0][0],   SEQ_LEN * EMBED_DIM))    return 1;
-    if (!read_int8 ("Wq.txt",          &Wq[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
-    if (!read_int8 ("Wk.txt",          &Wk[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
-    if (!read_int8 ("Wv.txt",          &Wv[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
+    if (!read_int8 ("Wq_transpose.txt",          &Wq[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
+    if (!read_int8 ("Wk_transpose.txt",          &Wk[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
+    if (!read_int8 ("Wv_transpose.txt",          &Wv[0][0],  EMBED_DIM * EMBED_DIM))  return 1;
     if (!read_float("bq.txt",          bq,          EMBED_DIM))             return 1;
     if (!read_float("bk.txt",          bk,          EMBED_DIM))             return 1;
     if (!read_float("bv.txt",          bv,          EMBED_DIM))             return 1;
