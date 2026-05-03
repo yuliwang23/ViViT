@@ -147,6 +147,43 @@ static bool load_txt_values_as_int8(const string &filename, int8_t *dst, size_t 
     return true;
 }
 
+static void print_event_status(const string &label, cl_event event)
+{
+    if (event == nullptr)
+    {
+        cout << label << "NULL" << endl;
+        return;
+    }
+
+    cl_int status = 0;
+    cl_int err = clGetEventInfo(event, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(status), &status, NULL);
+    cout << label;
+    if (err != CL_SUCCESS)
+    {
+        printf("clGetEventInfo ERROR: %d\n", err);
+        return;
+    }
+
+    switch (status)
+    {
+    case CL_QUEUED:
+        printf("QUEUED\n");
+        break;
+    case CL_SUBMITTED:
+        printf("SUBMITTED\n");
+        break;
+    case CL_RUNNING:
+        printf("RUNNING\n");
+        break;
+    case CL_COMPLETE:
+        printf("COMPLETE\n");
+        break;
+    default:
+        printf("ERROR: %d\n", status);
+        break;
+    }
+}
+
 // TODO: not implement here
 static int gelu_int(int x)
 {
@@ -680,7 +717,7 @@ int main(int argc, char *argv[])
 #ifdef ALL_MESSAGES
     cout << "HOST-Info: Creating Command Queue ... " << endl;
 #endif
-    Command_Queue = clCreateCommandQueue(Context, Target_Device_ID, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, &errCode);
+    Command_Queue = clCreateCommandQueue(Context, Target_Device_ID, CL_QUEUE_PROFILING_ENABLE, &errCode);
     if (errCode != CL_SUCCESS)
     {
         cout << endl
@@ -970,7 +1007,6 @@ int main(int argc, char *argv[])
     // buffer relative to X
     cl_mem GlobMem_BUF_X, GlobMem_BUF_X_norm, GlobMem_BUF_Attention_Out,
         GlobMem_BUF_LayerNorm_Scaler, GlobMem_BUF_Q, GlobMem_BUF_K, GlobMem_BUF_V;
-
     cl_mem GlobMem_BUF_frame_X[FRAME], GlobMem_BUF_frame_X_norm[FRAME], GlobMem_BUF_frame_LayerNorm_Scaler[FRAME];
 
     // cl_mem  GlobMem_BUF_frame_Q[FRAME], GlobMem_BUF_frame_K[FRAME], GlobMem_BUF_frame_V[FRAME], GlobMem_BUF_frame_Attention_Out[FRAME];
@@ -1036,6 +1072,7 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
+
     // ================================================
     //                  Ceate SubBuffer
     // ================================================
@@ -1217,7 +1254,7 @@ int main(int argc, char *argv[])
     vector<cl_event> Profiling_Memory_Events;
     vector<string> Profiling_Kernel_Names;
 
-    const int Nb_Of_Mem_Events = 8;
+    const int Nb_Of_Mem_Events = 10;
     const int Nb_Of_Exe_Events = 3;
     const int Nb_Of_Att_Events = NUM_HEADS;
     cl_event Mem_op_event[Nb_Of_Mem_Events];
@@ -1228,18 +1265,18 @@ int main(int argc, char *argv[])
     // ============================================================================
     //   [MEMORY STAGE]
     //   1. Migrate LayerNorm + QKV + Attention buffers to device
-    //        -> Mem_op_event[0 ~ 3]
+    //        -> Mem_op_event[0 ~ 5]
     //   [STAGE 1: LAYERNORM 0]
     //   2. K_layernorm (LN0)
-    //        waits: Mem_op_event[0], Mem_op_event[1]
+    //        waits: Mem_op_event[0], Mem_op_event[1], Mem_op_event[2], Mem_op_event[3]
     //        produces: K_exe_event[0]
     //   [STAGE 2: QKV PROJECTION]
     //   3. K_linear_qkv_multihead
-    //        waits: K_exe_event[0], Mem_op_event[2]
+    //        waits: K_exe_event[0], Mem_op_event[4]
     //        produces: K_exe_event[1]
     //   [STAGE 3: MULTI-HEAD ATTENTION]
     //   4. K_attention_opt[h] for each head
-    //        waits: K_exe_event[1], Mem_op_event[3]
+    //        waits: K_exe_event[1], Mem_op_event[5]
     //        produces: A_exe_event[h] for h in [0..NUM_HEADS-1]
     //   [STAGE 4: ATTENTION OUTPUT RETURN]
     //   5. Migrate Attention_Out back to host
@@ -1342,10 +1379,13 @@ int main(int argc, char *argv[])
 
             // setting kenel Args
 
+            cl_mem ln0_input_buf = GlobMem_BUF_frame_X[frame];
+            cl_mem ln0_xnorm_buf = GlobMem_BUF_frame_X_norm[frame];
+            cl_mem ln0_scaler_buf = GlobMem_BUF_frame_LayerNorm_Scaler[frame];
             cl_mem LayerNorm_Input_Buffers[] = {
-                GlobMem_BUF_frame_X[frame], GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta};
+                ln0_input_buf, GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta};
             cl_mem LayerNorm_Output_Buffers[] = {
-                GlobMem_BUF_frame_X_norm[frame], GlobMem_BUF_frame_LayerNorm_Scaler[frame]};
+                ln0_xnorm_buf, ln0_scaler_buf};
             cl_mem QKV_Input_Buffers[] = {
                 GlobMem_BUF_Wq, GlobMem_BUF_bq, GlobMem_BUF_scale_wq,
                 GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_scale_wk,
@@ -1357,19 +1397,19 @@ int main(int argc, char *argv[])
 
             // setting K_layernorm & K_linear_qkv_multihead Args
             errCode = false;
-            errCode |= clSetKernelArg(K_layernorm, 0, sizeof(cl_mem), &GlobMem_BUF_frame_X[frame]);
+            errCode |= clSetKernelArg(K_layernorm, 0, sizeof(cl_mem), &ln0_input_buf);
             errCode |= clSetKernelArg(K_layernorm, 1, sizeof(cl_mem), &GlobMem_BUF_LayerNorm_Gamma);
             errCode |= clSetKernelArg(K_layernorm, 2, sizeof(cl_mem), &GlobMem_BUF_LayerNorm_Beta);
-            errCode |= clSetKernelArg(K_layernorm, 3, sizeof(cl_mem), &GlobMem_BUF_frame_X_norm[frame]);
-            errCode |= clSetKernelArg(K_layernorm, 4, sizeof(cl_mem), &GlobMem_BUF_frame_LayerNorm_Scaler[frame]);
-            errCode |= clSetKernelArg(K_linear_qkv_multihead, 0, sizeof(cl_mem), &GlobMem_BUF_frame_X_norm[frame]);
+            errCode |= clSetKernelArg(K_layernorm, 3, sizeof(cl_mem), &ln0_xnorm_buf);
+            errCode |= clSetKernelArg(K_layernorm, 4, sizeof(cl_mem), &ln0_scaler_buf);
+            errCode |= clSetKernelArg(K_linear_qkv_multihead, 0, sizeof(cl_mem), &ln0_xnorm_buf);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 1, sizeof(cl_mem), &GlobMem_BUF_Wq);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 2, sizeof(cl_mem), &GlobMem_BUF_bq);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 3, sizeof(cl_mem), &GlobMem_BUF_Wk);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 4, sizeof(cl_mem), &GlobMem_BUF_bk);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 5, sizeof(cl_mem), &GlobMem_BUF_Wv);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 6, sizeof(cl_mem), &GlobMem_BUF_bv);
-            errCode |= clSetKernelArg(K_linear_qkv_multihead, 7, sizeof(cl_mem), &GlobMem_BUF_frame_LayerNorm_Scaler[frame]);
+            errCode |= clSetKernelArg(K_linear_qkv_multihead, 7, sizeof(cl_mem), &ln0_scaler_buf);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 8, sizeof(cl_mem), &GlobMem_BUF_scale_wq);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 9, sizeof(cl_mem), &GlobMem_BUF_scale_wk);
             errCode |= clSetKernelArg(K_linear_qkv_multihead, 10, sizeof(cl_mem), &GlobMem_BUF_scale_wv);
@@ -1407,30 +1447,97 @@ int main(int argc, char *argv[])
             // Step 5.2: Copy Input Data from Host to Global Memory
             // ------------------------------------------------------
             // move LayerNorm Args to Device
-            // move LayerNorm Output buffer to Device (TODO: is it useless?)
+            // move LayerNorm Output buffer to Device
             // move Weight params to linear_qkv_multihead
-            // move Attention Output buffer to Device (TODO: is it useless?)
+            // move Attention Output buffer to Device
             // ------------------------------------------------------
-            errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, LayerNorm_Input_Buffers, 0, 0, NULL, &Mem_op_event[0]);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[1]);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 9, QKV_Input_Buffers, 0, 0, NULL, &Mem_op_event[2]);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, NULL);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * NUM_HEADS], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
-            // origin error: errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * SEQ_LEN], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &LayerNorm_Input_Buffers[0], 0, 0, NULL, &Mem_op_event[0]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
-                     << "Host-Error: Failed to migrate LN0/QKV buffers for block " << block << endl
+                     << "Host-Error: Failed to enqueue migrate for LayerNorm_Input_Buffers[0] in block " << block << endl
                      << endl;
                 return EXIT_FAILURE;
             }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[0] status before wait: ", Mem_op_event[0]);
+            clWaitForEvents(1, &Mem_op_event[0]);
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[0] status after wait: ", Mem_op_event[0]);
+
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &LayerNorm_Input_Buffers[1], 0, 0, NULL, &Mem_op_event[1]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to enqueue migrate for LayerNorm_Input_Buffers[1] in block " << block << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[1] status before wait: ", Mem_op_event[1]);
+            clWaitForEvents(1, &Mem_op_event[1]);
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[1] status after wait: ", Mem_op_event[1]);
+
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &LayerNorm_Input_Buffers[2], 0, 0, NULL, &Mem_op_event[2]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to enqueue migrate for LayerNorm_Input_Buffers[2] in block " << block << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[2] status before wait: ", Mem_op_event[2]);
+            clWaitForEvents(1, &Mem_op_event[2]);
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[2] status after wait: ", Mem_op_event[2]);
+
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to enqueue migrate for LayerNorm_Output_Buffers in block " << block << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[3] status before wait: ", Mem_op_event[3]);
+            clWaitForEvents(1, &Mem_op_event[3]);
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[3] status after wait: ", Mem_op_event[3]);
+
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 9, QKV_Input_Buffers, 0, 0, NULL, &Mem_op_event[4]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to enqueue migrate for QKV_Input_Buffers in block " << block << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[4] status before wait: ", Mem_op_event[4]);
+            clWaitForEvents(1, &Mem_op_event[4]);
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[4] status after wait: ", Mem_op_event[4]);
+
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, NULL);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * NUM_HEADS], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[5]);
+            // origin error: errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * SEQ_LEN], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[5]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to migrate attention output buffers for block " << block << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[5] status before wait: ", Mem_op_event[5]);
+            clWaitForEvents(1, &Mem_op_event[5]);
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[5] status after wait: ", Mem_op_event[5]);
 
             // ----------------------------------------
             // Step 5.3: Submit Kernels for Execution
             // ----------------------------------------
-            cl_event layernorm_wait_list[] = {Mem_op_event[0], Mem_op_event[1]};
+            errCode = clEnqueueBarrierWithWaitList(Command_Queue, 0, NULL, NULL);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "HOST-Error: Failed to submit barrier before LN0" << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
             cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] enqueue kernel layernorm (LN0)" << endl;
-            errCode = clEnqueueTask(Command_Queue, K_layernorm, 2, layernorm_wait_list, &K_exe_event[0]);
+            errCode = clEnqueueTask(Command_Queue, K_layernorm, 0, NULL, &K_exe_event[0]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -1438,8 +1545,11 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] K_exe_event[0] status before wait: ", K_exe_event[0]);
+            clWaitForEvents(1, &K_exe_event[0]);
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] K_exe_event[0] status after wait: ", K_exe_event[0]);
 
-            cl_event qkv_wait_list[] = {K_exe_event[0], Mem_op_event[2]};
+            cl_event qkv_wait_list[] = {K_exe_event[0], Mem_op_event[4]};
             cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] enqueue kernel linear_qkv_multihead" << endl;
             errCode = clEnqueueTask(Command_Queue, K_linear_qkv_multihead, 2, qkv_wait_list, &K_exe_event[1]);
             if (errCode != CL_SUCCESS)
@@ -1449,11 +1559,14 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] K_exe_event[1] status before wait: ", K_exe_event[1]);
+            clWaitForEvents(1, &K_exe_event[1]);
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] K_exe_event[1] status after wait: ", K_exe_event[1]);
 
             for (int h = 0; h < NUM_HEADS; h++)
             {
                 int idx = frame * NUM_HEADS + h;
-                cl_event attention_wait_list[] = {K_exe_event[1], Mem_op_event[3]};
+                cl_event attention_wait_list[] = {K_exe_event[1], Mem_op_event[5]};
                 // Compute Attention
                 cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "][Head " << h << "] enqueue kernel attention_opt" << endl;
                 errCode = clEnqueueTask(Command_Queue, K_attention_opt[h], 2, attention_wait_list, &A_exe_event[h]);
@@ -1465,12 +1578,16 @@ int main(int argc, char *argv[])
                     return EXIT_FAILURE;
                 }
             }
+            for (int h = 0; h < NUM_HEADS; h++)
+            {
+                print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "][Head " + to_string(h) + "] A_exe_event status before wait: ", A_exe_event[h]);
+            }
             clWaitForEvents(12, A_exe_event);
             cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] all attention_opt kernels enqueued" << endl;
             // ---------------------------------------------------------
             // Step 5.4: Copy Results from Device to Host
             // ---------------------------------------------------------
-            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_HOST, NUM_HEADS, A_exe_event, &Mem_op_event[4]);
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_HOST, NUM_HEADS, A_exe_event, &Mem_op_event[6]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -1478,8 +1595,9 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
+            print_event_status("HOST-Debug: [Frame " + to_string(frame) + "][Encoder " + to_string(block) + "] Mem_op_event[6] status before host copy wait: ", Mem_op_event[6]);
             // must wait for all attention block finish and move data back to host
-            clWaitForEvents(1, &Mem_op_event[4]);
+            clWaitForEvents(1, &Mem_op_event[6]);
             cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] attention output copied back to host" << endl;
 
             // ----------------- MLP Part -------------------------------
@@ -1571,8 +1689,8 @@ int main(int argc, char *argv[])
             // ================================================
 
             errCode = false;
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 3, LayerNorm_Input_Buffers, 0, 1, &wait_MLP_finish, &Mem_op_event[5]);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 1, &wait_MLP_finish, &Mem_op_event[6]);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 3, LayerNorm_Input_Buffers, 0, 1, &wait_MLP_finish, &Mem_op_event[7]);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 1, &wait_MLP_finish, &Mem_op_event[8]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -1581,12 +1699,12 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
 
-            cl_event layernorm1_wait_list2[] = {Mem_op_event[5], Mem_op_event[6]};
+            cl_event layernorm1_wait_list2[] = {Mem_op_event[7], Mem_op_event[8]};
 
             // ================ fix error temporary	===========
-            clGetEventInfo(Mem_op_event[5], CL_EVENT_COMMAND_EXECUTION_STATUS,
+            clGetEventInfo(Mem_op_event[7], CL_EVENT_COMMAND_EXECUTION_STATUS,
                            sizeof(status), &status, NULL);
-            cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] Mem_op_event[5] status: ";
+            cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] Mem_op_event[7] status: ";
             switch (status)
             {
             case CL_QUEUED:
@@ -1606,9 +1724,9 @@ int main(int argc, char *argv[])
                 break;
             }
 
-            clGetEventInfo(Mem_op_event[6], CL_EVENT_COMMAND_EXECUTION_STATUS,
+            clGetEventInfo(Mem_op_event[8], CL_EVENT_COMMAND_EXECUTION_STATUS,
                            sizeof(status), &status, NULL);
-            cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] Mem_op_event[6] status: ";
+            cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] Mem_op_event[8] status: ";
             switch (status)
             {
             case CL_QUEUED:
@@ -1668,7 +1786,7 @@ int main(int argc, char *argv[])
             // cl_event ln1_to_host_wait_list[] = {K_exe_event[2 + NUM_HEADS * FRAME]};
 
             // TODO: is it useless?
-            errCode = clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[2], &Mem_op_event[7]);
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[2], &Mem_op_event[9]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -1676,7 +1794,7 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
-            clWaitForEvents(1, &Mem_op_event[7]);
+            clWaitForEvents(1, &Mem_op_event[9]);
             cout << "HOST-Debug: [Frame " << frame << "][Encoder " << block << "] LN1 output copied back to host" << endl;
 
             mlp_quant_host(X_norm, LayerNorm_scaler, MLP_W1, MLP_b1, MLP_scale_w1, MLP_W2, MLP_b2, MLP_scale_w2, MLP_Output);
