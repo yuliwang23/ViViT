@@ -209,8 +209,8 @@ void load_Weight_tile_FIFO2BRAM(
 }
 
 void load_Bias_HBM2BRAM(
-    int b[EMBED_DIM],
-    int BRAM_b[EMBED_DIM])
+    float b[EMBED_DIM],
+    float BRAM_b[EMBED_DIM])
 {
     load_b_loop:
     for (int i = 0; i < EMBED_DIM; i++) {
