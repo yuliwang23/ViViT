@@ -58,3 +58,116 @@ static const float M2_WT[NUM_ITERATIONS] = {
     16.0f*41/42,16.0f*42/43,16.0f*43/44,16.0f*44/45,16.0f*45/46,
     16.0f*46/47,16.0f*47/48
 };
+
+extern "C" {
+void linear_qkv_multihead(
+    uint256_dt *x,
+    uint256_dt *gamma,
+    uint256_dt *beta,
+    uint256_dt *Wk,
+    uint256_dt *Wv,
+    uint256_dt *Wq,
+    float *bq,
+    float *bk,
+    float *bv,
+    float *scale_wq,
+    float *scale_wk,
+    float *scale_wv,
+    uint256_dt *Q,
+    uint256_dt *K,
+    uint256_dt *V
+);
+}
+
+// ============================================================================
+// Sub-Function Declarations
+// ============================================================================
+
+// Memory Load Modules
+void load_X_HBM2FIFO(
+    uint256_dt *HBM_X,
+    hls::stream<uint256_dt> &FIFO_X
+);
+
+void load_X_FIFO2BRAM(
+    hls::stream<uint256_dt> &FIFO_X,
+    float BRAM_X[EMBED_DIM]
+);
+
+void load_beta_gamma_HBM2SRAM(
+    uint256_dt HBM_gamma[EMBED_DIM / 8],
+    uint256_dt HBM_beta[EMBED_DIM / 8],
+    float SRAM_gamma[EMBED_DIM],
+    float SRAM_beta[EMBED_DIM]
+);
+
+void load_Weight_tile_HBM2FIFO(
+    uint256_dt *W,
+    hls::stream<uint256_dt> &FIFO_W,
+    int row_offset
+);
+
+void load_Bias_HBM2BRAM(
+    float b[EMBED_DIM],
+    float BRAM_b[EMBED_DIM]
+);
+
+void load_Weight_tile_FIFO2URAM(
+    hls::stream<uint256_dt> &FIFO_W,
+    int64_dt URAM_W[TILE_SIZE][EMBED_DIM_package]
+);
+
+void load_All_Weights_Parallel(
+    hls::stream<uint256_dt> &FIFO_Wq,
+    hls::stream<uint256_dt> &FIFO_Wk,
+    hls::stream<uint256_dt> &FIFO_Wv,
+    int64_dt URAM_Wq[TILE_SIZE][EMBED_DIM_package], 
+    int64_dt URAM_Wk[TILE_SIZE][EMBED_DIM_package], 
+    int64_dt URAM_Wv[TILE_SIZE][EMBED_DIM_package]
+);
+
+// Computation Modules
+void compute_mean_variance(
+    float BRAM_X[EMBED_DIM],
+    float gamma[EMBED_DIM],
+    float beta[EMBED_DIM],
+    float *scaler,
+    int64_dt X_package[EMBED_DIM_package]
+);
+
+void layernorm_compute(
+    hls::stream<uint256_dt> &FIFO_X,
+    float scaler[SEQ_LEN],
+    float SRAM_gamma[EMBED_DIM],
+    float SRAM_beta[EMBED_DIM],
+    int64_dt X_package[SEQ_LEN][EMBED_DIM_package]
+);
+
+void compute_linear_qkv_one_head(
+    int64_dt X_package[SEQ_LEN][EMBED_DIM_package],
+    hls::stream<uint256_dt> &FIFO_Wq,
+    hls::stream<uint256_dt> &FIFO_Wk,
+    hls::stream<uint256_dt> &FIFO_Wv,
+    hls::stream<uint256_dt> &FIFO_Q_out,
+    hls::stream<uint256_dt> &FIFO_K_out,
+    hls::stream<uint256_dt> &FIFO_V_out,
+    float BRAM_bq[EMBED_DIM],
+    float BRAM_bk[EMBED_DIM],
+    float BRAM_bv[EMBED_DIM],
+    float scale_wq[EMBED_DIM],
+    float scale_wk[EMBED_DIM],
+    float scale_wv[EMBED_DIM],
+    float scale_X [SEQ_LEN],
+    int iter
+);
+
+// Memory Store Modules
+void store_QKV_FIFO2HBM(
+    hls::stream<uint256_dt> &FIFO_Q_out,
+    hls::stream<uint256_dt> &FIFO_K_out,
+    hls::stream<uint256_dt> &FIFO_V_out,
+    uint256_dt *Q,
+    uint256_dt *K,
+    uint256_dt *V,
+    int iter
+);
