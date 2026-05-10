@@ -9,7 +9,7 @@ constexpr int EMBED_DIM = 768;
 constexpr int NUM_HEADS = 12;
 constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS; // 64
 constexpr int OUT_TILE = 64;
-constexpr int PACK_INT8 = 32;
+constexpr int DOT_UNROLL = 16;
 
 extern "C" {
 void projection_out(
@@ -17,7 +17,7 @@ void projection_out(
     int8_t weight[EMBED_DIM][EMBED_DIM],
     float bias[EMBED_DIM],
     float scale_weight[EMBED_DIM],
-    float out[SEQ_LEN][EMBED_DIM]);
+    int out[SEQ_LEN][EMBED_DIM]);
 }
 
 void quantize_attention_token(
@@ -26,12 +26,23 @@ void quantize_attention_token(
     int8_t q_token[EMBED_DIM],
     float *scale);
 
-void project_token(
-    int8_t q_token[EMBED_DIM],
-    float scale_input,
+void quantize_attention_all(
+    float attention_in[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+    int8_t q_tokens[SEQ_LEN][EMBED_DIM],
+    float scale_input[SEQ_LEN]);
+
+void load_weight_tile(
     int8_t weight[EMBED_DIM][EMBED_DIM],
+    int o_tile,
+    int8_t weight_tile[EMBED_DIM][OUT_TILE]);
+
+void project_tile(
+    int8_t q_tokens[SEQ_LEN][EMBED_DIM],
+    float scale_input[SEQ_LEN],
+    int8_t weight_tile[EMBED_DIM][OUT_TILE],
+    int o_tile,
     float bias[EMBED_DIM],
     float scale_weight[EMBED_DIM],
-    float out_token[EMBED_DIM]);
+    int out[SEQ_LEN][EMBED_DIM]);
 
 #endif
