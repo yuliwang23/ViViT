@@ -189,7 +189,7 @@ void load_beta_gamma_HBM2SRAM(
     #pragma HLS INLINE off
     load_weights_loop:
     for (int i = 0; i < EMBED_DIM / 8; i++) {
-        #pragma HLS PIPELINE II=1
+        #pragma HLS PIPELINE II=2
         
         uint256_dt temp_gamma_chunk = HBM_gamma[i];
         uint256_dt temp_beta_chunk  = HBM_beta[i];
@@ -232,7 +232,7 @@ void compute_mean_variance(
 
     compute_top_loop:
     for(int j = 0, i = 0; j < EMBED_DIM; j+=16, i++){     
-        #pragma HLS PIPELINE
+        #pragma HLS PIPELINE II = 6
         float local_sum = 0.0f;
         float local_sum_sq = 0.0f;
         compute_local_sum:
@@ -243,8 +243,8 @@ void compute_mean_variance(
             local_sum_sq += val * val;
         }
         float X_b_mean = local_sum * 0.0625f; 
-        float M_2_B = local_sum_sq - (local_sum * X_b_mean);
         float mean_diff = X_b_mean - global_mean;
+        float M_2_B = local_sum_sq - (local_sum * X_b_mean);
         float mean_diff_sq = mean_diff * mean_diff;
         float mean_diff_mul_table_val = MEAN_WT[i] * mean_diff;
         float mean_diff_sq_mul_table_val = M2_WT[i] * mean_diff_sq;
@@ -379,7 +379,7 @@ void load_Weight_tile_FIFO2URAM(
     for (int i = 0; i < TILE_SIZE; i++) { 
         load_local_col:
         for (int j = 0; j < 24; j++) {
-            #pragma HLS PIPELINE II=2
+            #pragma HLS PIPELINE II=4
             uint256_dt temp_chunk = FIFO_W.read();
             unpack_loop:
             for (int k = 0; k < 4; k++) {

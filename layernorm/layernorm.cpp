@@ -120,7 +120,7 @@ void compute_mean_variance(
     float *scaler,
     int8_dt out[EMBED_DIM]
 ){
-    float local_global_mean = 0.0f; 
+    float global_mean = 0.0f; 
     float M2AB = 0.0f;
     float norm_buffer[EMBED_DIM];
     #pragma HLS ARRAY_PARTITION variable=norm_buffer type=cyclic factor=16
@@ -128,7 +128,7 @@ void compute_mean_variance(
     #pragma HLS INLINE off
     #pragma HLS ARRAY_PARTITION variable=gamma type=cyclic factor=8
     #pragma HLS ARRAY_PARTITION variable=beta  type=cyclic factor=8
-    // ç¢ºä?? HLS ??? gamma/beta ??ˆæ?ç‚º BRAM portï¼Œä?è?èµ° AXI
+    // ç¢ºï¿½?? HLS ??? gamma/beta ??ï¿½ï¿½?ï¿½ç‚º BRAM portï¼Œï¿½?ï¿½ï¿½?ï¿½èµ° AXI
     
     #pragma HLS INLINE off
     compute_top_loop:
@@ -145,10 +145,8 @@ void compute_mean_variance(
         }
         float X_b_mean = local_sum * 0.0625f; 
         float M_2_B = local_sum_sq - (local_sum * local_sum * 0.0625f);
-        float mean_diff = X_b_mean - local_global_mean;
-        //local_global_mean += MEAN_WT.data[i] * mean_diff;
-        //M2AB += M2_WT.data[i] * mean_diff * mean_diff + M_2_B;
-        local_global_mean += MEAN_WT[i] * mean_diff;
+        float mean_diff = X_b_mean - global_mean;
+        global_mean += MEAN_WT[i] * mean_diff;
         M2AB += M2_WT[i] * mean_diff * mean_diff + M_2_B;
     }
     
@@ -164,7 +162,7 @@ void compute_mean_variance(
         for(int k = 0; k < 16; k++){
             #pragma HLS UNROLL
             int idx = j + k;
-            float norm_val = (BRAM_X[idx] - local_global_mean) * inv_std_out * gamma[idx] + beta[idx];
+            float norm_val = (BRAM_X[idx] - global_mean) * inv_std_out * gamma[idx] + beta[idx];
             
             norm_buffer[idx] = norm_val;
             
@@ -307,8 +305,8 @@ void load_weights_HBM2SRAM(
 
 //     load_weights_HBM2SRAM(gamma, beta, SRAM_gamma, SRAM_beta);
 
-//     // ä¿®æ”¹??é?ï?šDATAFLOW ç§»åˆ° loop å¤–ï?Œå?…ä?ä?‰å?? task
-//     // ??Ÿæœ¬ DATAFLOW ?œ¨ loop ?…§??ƒé? æ?? FIFO deadlockï¼Œæ”¹??æ?å?? task ??„è‡ª??…å«å®Œæ•´??? SEQ_LEN è¿´å??
+//     // ä¿®æ”¹??ï¿½ï¿½?ï¿½ï¿½?ï¿½DATAFLOW ç§»åˆ° loop å¤–ï¿½?ï¿½ï¿½?ï¿½ï¿½?ï¿½ï¿½?ï¿½ï¿½?? task
+//     // ??ï¿½æœ¬ DATAFLOW ?ï¿½ï¿½ loop ?ï¿½ï¿½??ï¿½ï¿½?ï¿½ï¿½?? FIFO deadlockï¼Œæ”¹??ï¿½ï¿½?ï¿½ï¿½?? task ??ï¿½è‡ª??ï¿½å«å®Œæ•´??? SEQ_LEN è¿´ï¿½??
 //     #pragma HLS DATAFLOW
 //     load_X_HBM2FIFO_all(x, FIFO_X);
 //     compute_all(FIFO_X, scaler, SRAM_gamma, SRAM_beta, FIFO_out);
@@ -317,8 +315,8 @@ void load_weights_HBM2SRAM(
 // }
 
 // // ----------------------------------------------------------------
-// // ?–°å¢? wrapperï¼šæ?Šæ???? SEQ_LEN è¡Œç?? x ä¾å?é?é?? FIFO_X
-// // ??Ÿæœ¬??? load_X_HBM2FIFO ä¸ç”¨???
+// // ?ï¿½ï¿½ï¿½? wrapperï¼šï¿½?ï¿½ï¿½???? SEQ_LEN è¡Œï¿½?? x ä¾ï¿½?ï¿½ï¿½?ï¿½ï¿½?? FIFO_X
+// // ??ï¿½æœ¬??? load_X_HBM2FIFO ä¸ç”¨???
 // // ----------------------------------------------------------------
 // void load_X_HBM2FIFO_all(
 //     float x[SEQ_LEN][EMBED_DIM],
@@ -331,8 +329,8 @@ void load_weights_HBM2SRAM(
 // }
 
 // // ----------------------------------------------------------------
-// // ?–°å¢? wrapperï¼šå?? FIFO_X è®? xï¼Œè?ˆç?—å?Œç?æ?œé?é?? FIFO_out
-// // ??Ÿæœ¬??? load_X_FIFO2BRAM / compute_mean_variance / store_out_BRAM2FIFO ä¸ç”¨???
+// // ?ï¿½ï¿½ï¿½? wrapperï¼šï¿½?? FIFO_X ï¿½? xï¼Œï¿½?ï¿½ï¿½?ï¿½ï¿½?ï¿½ï¿½?ï¿½ï¿½?ï¿½ï¿½?ï¿½ï¿½?? FIFO_out
+// // ??ï¿½æœ¬??? load_X_FIFO2BRAM / compute_mean_variance / store_out_BRAM2FIFO ä¸ç”¨???
 // // ----------------------------------------------------------------
 // void compute_all(
 //     hls::stream<uint256_dt> &FIFO_X,
@@ -357,8 +355,8 @@ void load_weights_HBM2SRAM(
 // }
 
 // // ----------------------------------------------------------------
-// // ?–°å¢? wrapperï¼šå?? FIFO_out è®?çµæ?œå¯«??? HBM
-// // ??Ÿæœ¬??? store_out_FIFO2HBM ä¸ç”¨???
+// // ?ï¿½ï¿½ï¿½? wrapperï¼šï¿½?? FIFO_out ï¿½?çµï¿½?ï¿½å¯«??? HBM
+// // ??ï¿½æœ¬??? store_out_FIFO2HBM ä¸ç”¨???
 // // ----------------------------------------------------------------
 // void store_out_FIFO2HBM_all(
 //     hls::stream<uint256_dt> &FIFO_out,
@@ -366,12 +364,12 @@ void load_weights_HBM2SRAM(
 // {
 //     #pragma HLS INLINE off
 //     for(int i = 0; i < SEQ_LEN; i++){
-//         store_out_FIFO2HBM(FIFO_out, out[i]);  // ??Ÿæœ¬??„å‡½å¼ä?ç”¨???
+//         store_out_FIFO2HBM(FIFO_out, out[i]);  // ??ï¿½æœ¬??ï¿½å‡½å¼ï¿½?ï¿½ç”¨???
 //     }
 // }
 
 // // ----------------------------------------------------------------
-// // ä»¥ä?‹å?Ÿæœ¬??„å‡½å¼å…¨?ƒ¨ä¸å??
+// // ä»¥ï¿½?ï¿½ï¿½?ï¿½æœ¬??ï¿½å‡½å¼å…¨?ï¿½ï¿½ä¸ï¿½??
 // // ----------------------------------------------------------------
 // void load_X_HBM2FIFO(
 //     float X[EMBED_DIM],
@@ -438,7 +436,7 @@ void load_weights_HBM2SRAM(
 //     float *scaler,
 //     int8_dt out[EMBED_DIM]
 // ){
-//     float local_global_mean = 0.0f; 
+//     float global_mean = 0.0f; 
 //     float M2AB = 0.0f;
 //     float norm_buffer[EMBED_DIM];
 //     #pragma HLS ARRAY_PARTITION variable=norm_buffer type=cyclic factor=16
@@ -446,7 +444,7 @@ void load_weights_HBM2SRAM(
 //     #pragma HLS INLINE off
 //     #pragma HLS ARRAY_PARTITION variable=gamma type=cyclic factor=8
 //     #pragma HLS ARRAY_PARTITION variable=beta  type=cyclic factor=8
-//     // ç¢ºä?? HLS ??? gamma/beta ??ˆæ?ç‚º BRAM portï¼Œä?è?èµ° AXI
+//     // ç¢ºï¿½?? HLS ??? gamma/beta ??ï¿½ï¿½?ï¿½ç‚º BRAM portï¼Œï¿½?ï¿½ï¿½?ï¿½èµ° AXI
     
 //     #pragma HLS INLINE off
 //     compute_top_loop:
@@ -463,10 +461,10 @@ void load_weights_HBM2SRAM(
 //         }
 //         float X_b_mean = local_sum * 0.0625f; 
 //         float M_2_B = local_sum_sq - (local_sum * local_sum * 0.0625f);
-//         float mean_diff = X_b_mean - local_global_mean;
-//         //local_global_mean += MEAN_WT.data[i] * mean_diff;
+//         float mean_diff = X_b_mean - global_mean;
+//         //global_mean += MEAN_WT.data[i] * mean_diff;
 //         //M2AB += M2_WT.data[i] * mean_diff * mean_diff + M_2_B;
-//         local_global_mean += MEAN_WT[i] * mean_diff;
+//         global_mean += MEAN_WT[i] * mean_diff;
 //         M2AB += M2_WT[i] * mean_diff * mean_diff + M_2_B;
 //     }
     
@@ -482,7 +480,7 @@ void load_weights_HBM2SRAM(
 //         for(int k = 0; k < 16; k++){
 //             #pragma HLS UNROLL
 //             int idx = j + k;
-//             float norm_val = (BRAM_X[idx] - local_global_mean) * inv_std_out * gamma[idx] + beta[idx];
+//             float norm_val = (BRAM_X[idx] - global_mean) * inv_std_out * gamma[idx] + beta[idx];
             
 //             norm_buffer[idx] = norm_val;
             
