@@ -50,23 +50,16 @@ using namespace std;
 
 #include <CL/cl.h>
 #include "help_functions.h"
+#include "layer.h"
+#include "utility.h"
+//#include "host.h"
 
 #define ALL_MESSAGES
 
-constexpr int SEQ_LEN = 14 * 14 + 1; // 14x14 patches + 1 CLS token
-constexpr int EMBED_DIM = 768;
-constexpr int NUM_HEADS = 12;
-constexpr int FRAME = 16;
-constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS;
-constexpr int MLP_DIM = 3072;
-constexpr int NUM_ENCODER_BLOCKS = 12;
-static_assert(SEQ_LEN == 197, "spatial encoder kernels expect 196 patches plus one CLS token");
-static_assert(HEAD_DIM == 64, "spatial encoder attention kernels expect 64 channels per head");
-static_assert(EMBED_DIM % NUM_HEADS == 0, "embedding dimension must split evenly across heads");
-static_assert(MLP_DIM == 4 * EMBED_DIM, "spatial encoder MLP expansion must be 4x embedding dimension");
 
 // -----------------------------host side helper functions--------------------------------------
 // TODO: modify to load weight from quantized model
+/*
 static void init_random_int(int *data, size_t count, int min_value, int max_value)
 {
     int range = max_value - min_value + 1;
@@ -288,14 +281,14 @@ static void concat_attention_heads(int attention_heads[NUM_HEADS][SEQ_LEN][HEAD_
                 attention_concat[i][h * HEAD_DIM + d] = attention_heads[h][i][d];
 }
 
-static void concat_attention_heads_mp(float attention_heads[NUM_HEADS][SEQ_LEN][HEAD_DIM],
-                                   int attention_concat[SEQ_LEN][EMBED_DIM])
+static void concat_attention_heads_mp(int8_t attention_heads[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+                                   int8_t attention_concat[SEQ_LEN][EMBED_DIM])
 {
     #pragma omp parallel for collapse(2)
     for (int h = 0; h < NUM_HEADS; h++)
         for (int i = 0; i < SEQ_LEN; i++)
-            memcpy(&attention_concat[i][h * HEAD_DIM], &attention_heads[h][i][0], sizeof(int) * HEAD_DIM);
-            // HLS SLM error may caused by here
+            memcpy(&attention_concat[i][h * HEAD_DIM], &attention_heads[h][i][0], sizeof(int8_t) * HEAD_DIM);
+            // error may caused by here
             // original error code: memcpy(attention_concat + i * EMBED_DIM + h * HEAD_DIM, attention_heads + h * SEQ_LEN * HEAD_DIM + i * HEAD_DIM, sizeof(int) * HEAD_DIM);    
             //for (int d = 0; d < HEAD_DIM; d++)          
             //attention_concat[i][h * HEAD_DIM + d] = attention_heads[h][i][d];
@@ -439,12 +432,12 @@ static void linear_quant_host_fp32_input(
 }
 
 static void linear_quant_host_fp32_input_mp(
-    float in[SEQ_LEN][EMBED_DIM],
+    int8_t in[SEQ_LEN][EMBED_DIM],
     float scale_input[SEQ_LEN],
     int8_t weight[EMBED_DIM][EMBED_DIM],
     float bias[EMBED_DIM],
     float scale_weight[EMBED_DIM],
-    int out[SEQ_LEN][EMBED_DIM])
+    float out[SEQ_LEN][EMBED_DIM])
 {
     #pragma omp parallel for
     for (int i = 0; i < SEQ_LEN; i++)
@@ -591,7 +584,7 @@ static void mlp_host(int in[SEQ_LEN][EMBED_DIM],
         }
     }
 }
-
+*/
 //-------------------------------------------------------------------------------------
 
 // ----------------------------------Same as previous version of host.cpp----------------------------------
@@ -1110,7 +1103,7 @@ int main(int argc, char *argv[])
     Attention_Quant_Scales = reinterpret_cast<float *>(host_aligned_alloc(FRAME * SEQ_LEN * sizeof(float)));
     
     Attention_Concat = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int8_t)));
-    Attention_Projected = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int8_t)));
+    Attention_Projected = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(float)));
     After_Attention_Residual = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
     //MLP_Input = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
     MLP_Output = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
@@ -1741,7 +1734,7 @@ int main(int argc, char *argv[])
             // copy_int_to_float((After_Attention_Residual + frame * SEQ_LEN), (X + frame * SEQ_LEN));
 
             quantize_attention_heads_mp((Attention_Out + frame * NUM_HEADS), Attention_Out_Quant + frame * NUM_HEADS, Attention_Quant_Scales + frame);
-            concat_attention_heads_mp((Attention_Out + frame * NUM_HEADS), (Attention_Concat + frame * SEQ_LEN));
+            concat_attention_heads_mp((Attention_Out_Quant + frame * NUM_HEADS), (Attention_Concat + frame * SEQ_LEN));
             linear_quant_host_fp32_input_mp((Attention_Concat + frame * SEQ_LEN), Attention_Quant_Scales + frame, Wout, bout, scale_wout, (Attention_Projected + frame * SEQ_LEN));
             residual_add_mp((X + frame * SEQ_LEN), (Attention_Projected + frame * SEQ_LEN), (After_Attention_Residual + frame * SEQ_LEN));
             copy_int_to_float_mp((After_Attention_Residual + frame * SEQ_LEN), (X + frame * SEQ_LEN));
