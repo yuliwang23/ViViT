@@ -1,0 +1,76 @@
+class EncoderBlock(nn.Module):
+  """Transformer encoder block.
+
+  Attributes:
+    mlp_dim: Dimension of the mlp on top of attention block.
+    num_heads: Number of heads.
+    attention_axis: Axis over which we run attention.
+    dropout_rate: Dropout rate.
+    attention_dropout_rate: Dropout for attention heads.
+    droplayer_p: Probability of dropping a layer.
+    attention_kernel_initializer: Initializer to use for attention
+      layers.
+    deterministic: Deterministic or not (to apply dropout).
+    attention_fn: dot_product_attention or compatible function. Accepts query,
+      key, value, and returns output of shape `[bs, dim1, dim2, ..., dimN,,
+      num_heads, value_channels]``
+    dtype: The dtype of the computation (default: float32).
+
+  Returns:
+    Output after transformer encoder block.
+  """
+  mlp_dim: int
+  num_heads: int
+  dtype: jnp.dtype = jnp.float32
+  dropout_rate: float = 0.1
+  attention_dropout_rate: float = 0.1
+  attention_kernel_initializer: Initializer = nn.initializers.xavier_uniform()
+  attention_fn: Any = nn.dot_product_attention
+  droplayer_p: float = 0.0
+
+  def get_drop_pattern(self, x, deterministic):
+    if not deterministic and self.droplayer_p:
+      shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+      return jax.random.bernoulli(
+          self.make_rng('dropout'), self.droplayer_p, shape).astype('float32')
+    else:
+      return 0.0
+
+  @nn.compact
+  def __call__(self, inputs: jnp.ndarray, deterministic: bool) -> jnp.ndarray:
+    """Applies Encoder1DBlock module."""
+
+    # Attention block.
+    self.sow('intermediates', 'layer_norm_input_1', inputs)
+    x = nn.LayerNorm(dtype=self.dtype)(inputs)
+    self.sow('intermediates', 'MHA_input', x)
+    x = nn.MultiHeadDotProductAttention(
+        num_heads=self.num_heads,
+        kernel_init=self.attention_kernel_initializer,
+        broadcast_dropout=False,
+        dropout_rate=self.attention_dropout_rate,
+        attention_fn=self.attention_fn,
+        dtype=self.dtype)(
+            x, x, deterministic=deterministic)
+    x = nn.Dropout(rate=self.dropout_rate)(x, deterministic)
+    self.sow('intermediates', 'MHA_output', x)
+    drop_pattern = self.get_drop_pattern(x, deterministic)
+    x = x * (1.0 - drop_pattern) + inputs
+    # MLP block.
+    self.sow('intermediates', 'layer_norm_input_2', x) # 這裡有做殘差連結
+    y = nn.LayerNorm(dtype=self.dtype)(x)
+    self.sow('intermediates', 'MLP_input', y)
+    y = attention_layers.MlpBlock(
+        mlp_dim=self.mlp_dim,
+        dtype=self.dtype,
+        dropout_rate=self.dropout_rate,
+        activation_fn=nn.gelu,
+        kernel_init=nn.initializers.xavier_uniform(),
+        bias_init=nn.initializers.normal(stddev=1e-6))(
+            y, deterministic=deterministic)
+    self.sow('intermediates', 'MLP_output', y)
+    drop_pattern = self.get_drop_pattern(x, deterministic)
+    y = y * (1.0 - drop_pattern) + x
+    self.sow('intermediates', 'encoder_output', y) # 這裡有做殘差連結
+
+    return y 

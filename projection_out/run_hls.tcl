@@ -6,8 +6,9 @@ set_top projection_out
 
 open_solution -reset solution1
 set_part {xcvu37p-fsvh2892-2L-e}
-create_clock -period "75MHz"
+create_clock -period 13.333
 
 csim_design
+csynth_design
 
 exit
