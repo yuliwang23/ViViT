@@ -24,7 +24,7 @@ extern "C"
         float scale_weight[EMBED_DIM],
         int out[SEQ_LEN][EMBED_DIM]) // 197 x 768
     {
-#pragma HLS INTERFACE m_axi port = attention_in offset = slave bundle = gmem0 max_widen_bitwidth = 256
+#pragma HLS INTERFACE m_axi port = attention_in offset = slave bundle = gmem0 max_widen_bitwidth = 256 // memory access 256 bits at a time (32 int8 values)
 #pragma HLS INTERFACE m_axi port = out offset = slave bundle = gmem1 max_widen_bitwidth = 256
 #pragma HLS INTERFACE m_axi port = weight offset = slave bundle = gmem2 max_widen_bitwidth = 256
 #pragma HLS INTERFACE m_axi port = bias offset = slave bundle = gmem3 max_widen_bitwidth = 256
@@ -41,7 +41,7 @@ extern "C"
         static float scale_input[SEQ_LEN];              // Scale factor for each token's quantized attention concat
         static int8_t weight_tile[EMBED_DIM][OUT_TILE]; // Tile of the weight matrix
 
-#pragma HLS ARRAY_PARTITION variable = q_tokens type = cyclic factor = 32 dim = 2
+#pragma HLS ARRAY_PARTITION variable = q_tokens type = cyclic factor = 32 dim = 2 // Partition the quantized tokens by columns (embedding dimension) with a factor of 32 to enable parallel access to 32 int8 values for the dot product
 #pragma HLS ARRAY_PARTITION variable = weight_tile type = cyclic factor = DOT_UNROLL dim = 1
 #pragma HLS BIND_STORAGE variable = q_tokens type = ram_2p impl = uram
 #pragma HLS BIND_STORAGE variable = weight_tile type = ram_2p impl = bram
@@ -122,7 +122,7 @@ quant_head:
             const int flat = h * HEAD_DIM + d;
             const float scaled = attention_in[h][token][d] * inv_scale;
             const int rounded = static_cast<int>(roundf(scaled));
-            q_token[flat] = clamp_int8(rounded);
+            q_token[flat] = clamp_int8(rounded); // concatenate the quantized heads for this token into one vector of size EMBED_DIM (NUM_HEADS * HEAD_DIM)
         }
     }
 }
