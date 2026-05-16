@@ -1,5 +1,34 @@
 #include "projection.h"
 
+#include <ap_int.h>
+
+typedef ap_uint<64> qpack_t;
+
+void quantize_attention_token(
+    float attention_in[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+    int token,
+    qpack_t q_token_pack[EMBED_DIM_PACKED],
+    float *scale);
+
+void quantize_attention_all(
+    float attention_in[NUM_HEADS][SEQ_LEN][HEAD_DIM],
+    qpack_t q_tokens_pack[SEQ_LEN][EMBED_DIM_PACKED],
+    float scale_input[SEQ_LEN]);
+
+void load_weight_tile(
+    int8_t weight[EMBED_DIM][EMBED_DIM],
+    int o_tile,
+    int8_t weight_tile[EMBED_DIM][OUT_TILE]);
+
+void project_tile(
+    qpack_t q_tokens_pack[SEQ_LEN][EMBED_DIM_PACKED],
+    float scale_input[SEQ_LEN],
+    int8_t weight_tile[EMBED_DIM][OUT_TILE],
+    int o_tile,
+    float bias[EMBED_DIM],
+    float scale_weight[EMBED_DIM],
+    int out[SEQ_LEN][EMBED_DIM]);
+
 // Clamp a value to the int8 range [-128, 127]
 static int8_t clamp_int8(int value)
 {
@@ -37,29 +66,29 @@ extern "C"
 #pragma HLS INTERFACE s_axilite port = out bundle = control
 #pragma HLS INTERFACE s_axilite port = return bundle = control
 
-        static int8_t q_tokens[SEQ_LEN][EMBED_DIM];     // Quantized attention concat for each token
-        static float scale_input[SEQ_LEN];              // Scale factor for each token's quantized attention concat
-        static int8_t weight_tile[EMBED_DIM][OUT_TILE]; // Tile of the weight matrix
+        static qpack_t q_tokens_pack[SEQ_LEN][EMBED_DIM_PACKED]; // 8 packed int8 values per 64-bit word
+        static float scale_input[SEQ_LEN];                       // Scale factor for each token's quantized attention concat
+        static int8_t weight_tile[EMBED_DIM][OUT_TILE];          // Tile of the weight matrix
 
-#pragma HLS ARRAY_PARTITION variable = q_tokens type = cyclic factor = 32 dim = 2 // Partition the quantized tokens by columns (embedding dimension) with a factor of 32 to enable parallel access to 32 int8 values for the dot product
+#pragma HLS ARRAY_PARTITION variable = q_tokens_pack type = cyclic factor = PACKS_PER_DOT dim = 2
 #pragma HLS ARRAY_PARTITION variable = weight_tile type = cyclic factor = DOT_UNROLL dim = 1
-#pragma HLS BIND_STORAGE variable = q_tokens type = ram_2p impl = uram
+#pragma HLS BIND_STORAGE variable = q_tokens_pack type = ram_2p impl = uram
 #pragma HLS BIND_STORAGE variable = weight_tile type = ram_2p impl = bram
 
-        quantize_attention_all(attention_in, q_tokens, scale_input);
+        quantize_attention_all(attention_in, q_tokens_pack, scale_input);
 
     out_tile_loop:
         for (int o_tile = 0; o_tile < EMBED_DIM; o_tile += OUT_TILE)
         {
             load_weight_tile(weight, o_tile, weight_tile);
-            project_tile(q_tokens, scale_input, weight_tile, o_tile, bias, scale_weight, out);
+            project_tile(q_tokens_pack, scale_input, weight_tile, o_tile, bias, scale_weight, out);
         }
     }
 }
 
 void quantize_attention_all( // Quantize the attention output for all tokens
     float attention_in[NUM_HEADS][SEQ_LEN][HEAD_DIM],
-    int8_t q_tokens[SEQ_LEN][EMBED_DIM],
+    qpack_t q_tokens_pack[SEQ_LEN][EMBED_DIM_PACKED],
     float scale_input[SEQ_LEN])
 {
 #pragma HLS INLINE off
@@ -67,37 +96,41 @@ void quantize_attention_all( // Quantize the attention output for all tokens
 quant_token_loop:
     for (int token = 0; token < SEQ_LEN; token++)
     {
-        quantize_attention_token(attention_in, token, q_tokens[token], &scale_input[token]);
+        quantize_attention_token(attention_in, token, q_tokens_pack[token], &scale_input[token]);
     }
 }
 
 void quantize_attention_token( // Quantize the attention output for a single token across all heads
     float attention_in[NUM_HEADS][SEQ_LEN][HEAD_DIM],
     int token,
-    int8_t q_token[EMBED_DIM],
+    qpack_t q_token_pack[EMBED_DIM_PACKED],
     float *scale)
 {
 #pragma HLS INLINE off
+    float token_buf[EMBED_DIM];
+#pragma HLS ARRAY_PARTITION variable = token_buf type = cyclic factor = PACK_FACTOR dim = 1
+
     uint32_t max_abs_bits = 0;
 
-find_max_head:
-    for (int h = 0; h < NUM_HEADS; h++)
+load_token:
+    for (int flat = 0; flat < EMBED_DIM; flat++)
     {
-    find_max_dim:
-        for (int d = 0; d < HEAD_DIM; d++)
-        {
 #pragma HLS PIPELINE II = 1
-            union
-            {
-                float f;
-                uint32_t u;
-            } converter;
-            converter.f = attention_in[h][token][d];
-            const uint32_t abs_bits = converter.u & 0x7fffffffu;
-            if (abs_bits > max_abs_bits)
-            {
-                max_abs_bits = abs_bits;
-            }
+        const int h = flat / HEAD_DIM;
+        const int d = flat - h * HEAD_DIM;
+        const float value = attention_in[h][token][d];
+        token_buf[flat] = value;
+
+        union
+        {
+            float f;
+            uint32_t u;
+        } converter;
+        converter.f = value;
+        const uint32_t abs_bits = converter.u & 0x7fffffffu;
+        if (abs_bits > max_abs_bits)
+        {
+            max_abs_bits = abs_bits;
         }
     }
 
@@ -112,18 +145,25 @@ find_max_head:
     const float inv_scale = (max_abs > 0.0f) ? (127.0f / max_abs) : 1.0f;
     *scale = local_scale;
 
-quant_head:
-    for (int h = 0; h < NUM_HEADS; h++)
+quant_pack:
+    for (int pack_idx = 0; pack_idx < EMBED_DIM_PACKED; pack_idx++)
     {
-    quant_dim:
-        for (int d = 0; d < HEAD_DIM; d++)
-        {
 #pragma HLS PIPELINE II = 1
-            const int flat = h * HEAD_DIM + d;
-            const float scaled = attention_in[h][token][d] * inv_scale;
+        qpack_t pack = 0;
+
+    pack_lane:
+        for (int lane = 0; lane < PACK_FACTOR; lane++)
+        {
+#pragma HLS UNROLL
+            const int flat = pack_idx * PACK_FACTOR + lane;
+            const float scaled = token_buf[flat] * inv_scale;
             const int rounded = static_cast<int>(roundf(scaled));
-            q_token[flat] = clamp_int8(rounded); // concatenate the quantized heads for this token into one vector of size EMBED_DIM (NUM_HEADS * HEAD_DIM)
+            const int bit_offset = lane * 8;
+            const ap_uint<8> q_bits = static_cast<unsigned char>(clamp_int8(rounded));
+            pack.range(bit_offset + 7, bit_offset) = q_bits;
         }
+
+        q_token_pack[pack_idx] = pack;
     }
 }
 
@@ -147,7 +187,7 @@ load_w_row:
 }
 
 void project_tile(
-    int8_t q_tokens[SEQ_LEN][EMBED_DIM],
+    qpack_t q_tokens_pack[SEQ_LEN][EMBED_DIM_PACKED],
     float scale_input[SEQ_LEN],
     int8_t weight_tile[EMBED_DIM][OUT_TILE],
     int o_tile,
@@ -171,13 +211,30 @@ token_loop:
             {
 #pragma HLS PIPELINE II = 1
                 int32_t local_acc = 0;
-            dot_unroll:
-                for (int r = 0; r < DOT_UNROLL; r++)
+                qpack_t q_pack[PACKS_PER_DOT];
+#pragma HLS ARRAY_PARTITION variable = q_pack complete dim = 1
+
+            load_q_pack:
+                for (int p = 0; p < PACKS_PER_DOT; p++)
                 {
 #pragma HLS UNROLL
-                    const int in_col = d + r;
-                    local_acc += static_cast<int32_t>(q_tokens[token][in_col]) *
-                                 static_cast<int32_t>(weight_tile[in_col][o]);
+                    q_pack[p] = q_tokens_pack[token][(d / PACK_FACTOR) + p];
+                }
+
+            dot_unpack:
+                for (int p = 0; p < PACKS_PER_DOT; p++)
+                {
+#pragma HLS UNROLL
+                dot_unroll:
+                    for (int r = 0; r < PACK_FACTOR; r++)
+                    {
+#pragma HLS UNROLL
+                        const int in_col = d + p * PACK_FACTOR + r;
+                        const int bit_offset = r * 8;
+                        const ap_int<8> q_val = q_pack[p].range(bit_offset + 7, bit_offset);
+                        local_acc += static_cast<int32_t>(q_val) *
+                                     static_cast<int32_t>(weight_tile[in_col][o]);
+                    }
                 }
                 acc += local_acc;
             }
