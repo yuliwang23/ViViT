@@ -7,8 +7,8 @@ static float attention_in[NUM_HEADS][SEQ_LEN][HEAD_DIM];
 static int8_t weight[EMBED_DIM][EMBED_DIM];
 static float bias[EMBED_DIM];
 static float scale_weight[EMBED_DIM];
-static int out_hw[SEQ_LEN][EMBED_DIM];
-static int out_ref[SEQ_LEN][EMBED_DIM];
+static float out_hw[SEQ_LEN][EMBED_DIM];
+static float out_ref[SEQ_LEN][EMBED_DIM];
 
 static int8_t clamp_ref(int value)
 {
@@ -53,7 +53,7 @@ static void projection_ref()
             }
             const float dequant =
                 static_cast<float>(acc) * scale_input * scale_weight[o] + bias[o];
-            out_ref[token][o] = static_cast<int>(std::round(dequant));
+            out_ref[token][o] = dequant;
         }
     }
 }
@@ -83,18 +83,18 @@ int main()
     projection_ref();
     projection_out(attention_in, weight, bias, scale_weight, out_hw);
 
-    int max_err = 0;
+    float max_err = 0.0f;
     for (int i = 0; i < SEQ_LEN; i++) {
         for (int o = 0; o < EMBED_DIM; o++) {
-            const int err = std::abs(out_hw[i][o] - out_ref[i][o]);
+            const float err = std::fabs(out_hw[i][o] - out_ref[i][o]);
             if (err > max_err) {
                 max_err = err;
             }
         }
     }
 
-    std::printf("projection_out max int error = %d\n", max_err);
-    if (max_err != 0) {
+    std::printf("projection_out max fp32 error = %.8f\n", max_err);
+    if (max_err > 1.0e-5f) {
         std::printf("FAIL\n");
         return 1;
     }

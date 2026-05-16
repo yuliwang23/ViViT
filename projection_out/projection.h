@@ -32,7 +32,7 @@ extern "C"
         int8_t weight[EMBED_DIM][EMBED_DIM],
         float bias[EMBED_DIM],
         float scale_weight[EMBED_DIM],
-        int out[SEQ_LEN][EMBED_DIM]);
+        float out[SEQ_LEN][EMBED_DIM]);
 }
 
 #endif

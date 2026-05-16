@@ -957,7 +957,8 @@ int main(int argc, char *argv[])
     // -------------------------------------------------------------
     // Step 3.4: Create Kernels
     // -------------------------------------------------------------
-    cl_kernel K_layernorm[2], K_linear_qkv_multihead, K_attention_opt[NUM_HEADS];
+    cl_kernel K_layernorm[2], K_linear_qkv_multihead, K_attention_opt[NUM_HEADS],
+        K_projection_out, K_residual;
 
 #ifdef ALL_MESSAGES
     cout << "HOST-Info: Creating a Kernel: layernorm ..." << endl;
@@ -1000,6 +1001,30 @@ int main(int argc, char *argv[])
                  << endl;
             return EXIT_FAILURE;
         }
+    }
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating a Kernel: projection_out ..." << endl;
+#endif
+    K_projection_out = clCreateKernel(Program, "projection_out", &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to create K_projection_out" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating a Kernel: residual ..." << endl;
+#endif
+    K_residual = clCreateKernel(Program, "residual", &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to create K_residual" << endl
+             << endl;
+        return EXIT_FAILURE;
     }
     // TODO: Add mlp kernel
 
@@ -1050,6 +1075,7 @@ int main(int argc, char *argv[])
     float *Attention_Quant_Scales;                   // FRAME * SEQ_LEN
     int8_t (*Attention_Concat)[EMBED_DIM];         // FRAME * SEQ_LEN * EMBED_DIM
     float (*Attention_Projected)[EMBED_DIM];      // FRAME * SEQ_LEN * EMBED_DIM
+    float (*After_Attention_Residual_Float)[EMBED_DIM]; // FRAME * SEQ_LEN * EMBED_DIM
     int (*After_Attention_Residual)[EMBED_DIM]; // FRAME * SEQ_LEN * EMBED_DIM
     //int (*MLP_Input)[EMBED_DIM];                // FRAME * SEQ_LEN * EMBED_DIM
     int (*MLP_Output)[EMBED_DIM];               // FRAME * SEQ_LEN * EMBED_DIM
@@ -1104,6 +1130,7 @@ int main(int argc, char *argv[])
     
     Attention_Concat = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int8_t)));
     Attention_Projected = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(float)));
+    After_Attention_Residual_Float = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(float)));
     After_Attention_Residual = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
     //MLP_Input = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
     MLP_Output = reinterpret_cast<int (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int)));
@@ -1115,7 +1142,7 @@ int main(int argc, char *argv[])
         !Wout || !bout || !scale_wout || !LayerNorm1_gamma || !LayerNorm1_beta ||
         !Q || !K_out || !V || !Attention_Out || !Attention_Out_Quant || !Attention_Quant_Scales ||
         !Attention_Concat || !Attention_Projected ||
-        !After_Attention_Residual || !MLP_Output || !Spatial_Encoder_Output ||
+        !After_Attention_Residual_Float || !After_Attention_Residual || !MLP_Output || !Spatial_Encoder_Output ||
         !MLP_W1 || !MLP_b1 || !MLP_scale_w1 || !MLP_W2 || !MLP_b2 || !MLP_scale_w2) // remove !MLP_Input, since it's unuse
     {
         cout << endl
@@ -1172,17 +1199,22 @@ int main(int argc, char *argv[])
 #endif
 
     // buffer relative to X
-    cl_mem GlobMem_BUF_X, GlobMem_BUF_X_norm, GlobMem_BUF_Attention_Out, 
+    cl_mem GlobMem_BUF_X, GlobMem_BUF_X_norm, GlobMem_BUF_Attention_Out,
+        GlobMem_BUF_Attention_Projected,
+        GlobMem_BUF_After_Attention_Residual_Float,
         GlobMem_BUF_LayerNorm_Scaler, GlobMem_BUF_Q, GlobMem_BUF_K, GlobMem_BUF_V;
     
-    cl_mem GlobMem_BUF_frame_X[FRAME], GlobMem_BUF_frame_X_norm[FRAME], GlobMem_BUF_frame_LayerNorm_Scaler[FRAME];
+    cl_mem GlobMem_BUF_frame_X[FRAME], GlobMem_BUF_frame_X_norm[FRAME], GlobMem_BUF_frame_LayerNorm_Scaler[FRAME],
+        GlobMem_BUF_frame_Attention_Out[FRAME], GlobMem_BUF_frame_Attention_Projected[FRAME],
+        GlobMem_BUF_frame_After_Attention_Residual_Float[FRAME];
 
     //cl_mem  GlobMem_BUF_frame_Q[FRAME], GlobMem_BUF_frame_K[FRAME], GlobMem_BUF_frame_V[FRAME], GlobMem_BUF_frame_Attention_Out[FRAME];
 
     cl_mem GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta,
         GlobMem_BUF_Wq, GlobMem_BUF_bq, GlobMem_BUF_scale_wq,
         GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_scale_wk,
-        GlobMem_BUF_Wv, GlobMem_BUF_bv, GlobMem_BUF_scale_wv;
+        GlobMem_BUF_Wv, GlobMem_BUF_bv, GlobMem_BUF_scale_wv,
+        GlobMem_BUF_Wout, GlobMem_BUF_bout, GlobMem_BUF_scale_wout;
     
     GlobMem_BUF_X = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * EMBED_DIM * sizeof(float), X, &errCode);
     if (errCode != CL_SUCCESS)
@@ -1240,6 +1272,22 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
+    GlobMem_BUF_Attention_Projected = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * EMBED_DIM * sizeof(float), Attention_Projected, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to allocate GlobMem_BUF_Attention_Projected" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    GlobMem_BUF_After_Attention_Residual_Float = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * EMBED_DIM * sizeof(float), After_Attention_Residual_Float, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to allocate GlobMem_BUF_After_Attention_Residual_Float" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
     // ================================================
     //                  Ceate SubBuffer
     // ================================================ 
@@ -1248,6 +1296,8 @@ int main(int argc, char *argv[])
     size_t frame_size_scaler         = SEQ_LEN * sizeof(float);
     size_t frame_size_QKV            = NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float);
     size_t frame_size_Attention_Out  = NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float);
+    size_t frame_size_Attention_Projected = SEQ_LEN * EMBED_DIM * sizeof(float);
+    size_t frame_size_After_Attention_Residual_Float = SEQ_LEN * EMBED_DIM * sizeof(float);
     for (int f = 0; f < FRAME; f++)
     {
         cl_buffer_region region;
@@ -1288,6 +1338,45 @@ int main(int argc, char *argv[])
         if (errCode != CL_SUCCESS)
         {
             cout << "Host-Error: SubBuffer GlobMem_BUF_frame_LayerNorm_Scaler creation failed at frame " << f << endl;
+            return EXIT_FAILURE;
+        }
+
+        // ---------------- Attention Out ----------------
+        region.origin = f * frame_size_Attention_Out;
+        region.size   = frame_size_Attention_Out;
+        GlobMem_BUF_frame_Attention_Out[f] = clCreateSubBuffer(
+            GlobMem_BUF_Attention_Out, CL_MEM_READ_WRITE,
+            CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode);
+
+        if (errCode != CL_SUCCESS)
+        {
+            cout << "Host-Error: SubBuffer GlobMem_BUF_frame_Attention_Out creation failed at frame " << f << endl;
+            return EXIT_FAILURE;
+        }
+
+        // ---------------- Attention Projected Float ----------------
+        region.origin = f * frame_size_Attention_Projected;
+        region.size   = frame_size_Attention_Projected;
+        GlobMem_BUF_frame_Attention_Projected[f] = clCreateSubBuffer(
+            GlobMem_BUF_Attention_Projected, CL_MEM_READ_WRITE,
+            CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode);
+
+        if (errCode != CL_SUCCESS)
+        {
+            cout << "Host-Error: SubBuffer GlobMem_BUF_frame_Attention_Projected creation failed at frame " << f << endl;
+            return EXIT_FAILURE;
+        }
+
+        // ---------------- Attention Residual Float ----------------
+        region.origin = f * frame_size_After_Attention_Residual_Float;
+        region.size   = frame_size_After_Attention_Residual_Float;
+        GlobMem_BUF_frame_After_Attention_Residual_Float[f] = clCreateSubBuffer(
+            GlobMem_BUF_After_Attention_Residual_Float, CL_MEM_READ_WRITE,
+            CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode);
+
+        if (errCode != CL_SUCCESS)
+        {
+            cout << "Host-Error: SubBuffer GlobMem_BUF_frame_After_Attention_Residual_Float creation failed at frame " << f << endl;
             return EXIT_FAILURE;
         }
         
@@ -1421,6 +1510,30 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
+    GlobMem_BUF_Wout = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * EMBED_DIM * sizeof(int8_t), Wout, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to allocate GlobMem_BUF_Wout" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    GlobMem_BUF_bout = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), bout, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to allocate GlobMem_BUF_bout" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    GlobMem_BUF_scale_wout = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), scale_wout, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to allocate GlobMem_BUF_scale_wout" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
     
     
 
@@ -1440,8 +1553,8 @@ int main(int argc, char *argv[])
     vector<cl_event> Profiling_Memory_Events;
     vector<string> Profiling_Kernel_Names;
 
-    const int Nb_Of_Mem_Events = 8;
-    const int Nb_Of_Exe_Events = 3;
+    const int Nb_Of_Mem_Events = 13;
+    const int Nb_Of_Exe_Events = 5;
     const int Nb_Of_Att_Events = NUM_HEADS;
     cl_event Mem_op_event[Nb_Of_Mem_Events];
     cl_event K_exe_event[Nb_Of_Exe_Events];
@@ -1574,6 +1687,8 @@ int main(int argc, char *argv[])
                 GlobMem_BUF_Wq, GlobMem_BUF_bq, GlobMem_BUF_scale_wq,
                 GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_scale_wk,
                 GlobMem_BUF_Wv, GlobMem_BUF_bv, GlobMem_BUF_scale_wv};
+            cl_mem Projection_Input_Buffers[] = {
+                GlobMem_BUF_Wout, GlobMem_BUF_bout, GlobMem_BUF_scale_wout};
 
             // ----------------------------------------
             // Step 5.1: Set Kernel Arguments
@@ -1625,6 +1740,32 @@ int main(int argc, char *argv[])
                     return EXIT_FAILURE;
                 }
             }
+
+            errCode = false;
+            errCode |= clSetKernelArg(K_projection_out, 0, sizeof(cl_mem), &GlobMem_BUF_frame_Attention_Out[frame]);
+            errCode |= clSetKernelArg(K_projection_out, 1, sizeof(cl_mem), &GlobMem_BUF_Wout);
+            errCode |= clSetKernelArg(K_projection_out, 2, sizeof(cl_mem), &GlobMem_BUF_bout);
+            errCode |= clSetKernelArg(K_projection_out, 3, sizeof(cl_mem), &GlobMem_BUF_scale_wout);
+            errCode |= clSetKernelArg(K_projection_out, 4, sizeof(cl_mem), &GlobMem_BUF_frame_Attention_Projected[frame]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                    << "Host-ERROR: Failed to set projection_out kernel arguments for frame: "<< frame << ", block: " << block << endl
+                    << endl;
+                return EXIT_FAILURE;
+            }
+
+            errCode = false;
+            errCode |= clSetKernelArg(K_residual, 0, sizeof(cl_mem), &GlobMem_BUF_frame_X[frame]);
+            errCode |= clSetKernelArg(K_residual, 1, sizeof(cl_mem), &GlobMem_BUF_frame_Attention_Projected[frame]);
+            errCode |= clSetKernelArg(K_residual, 2, sizeof(cl_mem), &GlobMem_BUF_frame_After_Attention_Residual_Float[frame]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                    << "Host-ERROR: Failed to set attention residual kernel arguments for frame: "<< frame << ", block: " << block << endl
+                    << endl;
+                return EXIT_FAILURE;
+            }
             
 
             // ------------------------------------------------------
@@ -1640,6 +1781,8 @@ int main(int argc, char *argv[])
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 9, QKV_Input_Buffers, 0, 0, NULL, &Mem_op_event[2]);
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, NULL);
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * NUM_HEADS], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 3, Projection_Input_Buffers, 0, 0, NULL, &Mem_op_event[4]);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_Attention_Projected[frame], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[5]);
             // origin error: errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * SEQ_LEN], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
             if (errCode != CL_SUCCESS)
             {
@@ -1689,43 +1832,6 @@ int main(int argc, char *argv[])
                     return EXIT_FAILURE;
                 }
             }
-            clWaitForEvents(NUM_HEADS, A_exe_event);
-            cout << "----------- Step 5.1 12 head attention compute finish -----------------\n";
-            // ---------------------------------------------------------
-            // Step 5.4: Copy Results from Device to Host
-            // ---------------------------------------------------------
-            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_HOST, NUM_HEADS, A_exe_event, &Mem_op_event[4]);
-            if (errCode != CL_SUCCESS)
-            {
-                cout << endl
-                    << "Host-Error: Failed to copy attention output to host for block " << block << endl
-                    << endl;
-                return EXIT_FAILURE;
-            }
-            // must wait for all attention block finish and move data back to host
-            clWaitForEvents(1, &Mem_op_event[4]);
-
-            // ----------------- MLP Part -------------------------------
-            // ================ fix error temporary	===========
-			cl_event wait_MLP_finish = clCreateUserEvent(Context, NULL); // wait MLP finish
-			cout << "----- ready to compute MLP-----\n";
-
-			cl_int status;
-			clGetEventInfo(wait_MLP_finish, CL_EVENT_COMMAND_EXECUTION_STATUS,
-			               sizeof(status), &status, NULL);
-			cout << "wait_MLP_finish: ";
-			switch(status) {
-			    case CL_QUEUED:    printf("QUEUED\n"); break;
-			    case CL_SUBMITTED: printf("SUBMITTED\n"); break;
-			    case CL_RUNNING:   printf("RUNNING\n"); break;
-			    case CL_COMPLETE:  printf("COMPLETE\n"); break;
-			    default:           printf("ERROR: %d\n", status); break;
-			}
-
-			// ================================================
-
-
-
             auto Host_Post_Start = chrono::high_resolution_clock::now();
 
             // concat_attention_heads((Attention_Out + frame * NUM_HEADS), (Attention_Concat + frame * SEQ_LEN));
@@ -1733,11 +1839,61 @@ int main(int argc, char *argv[])
             // residual_add((X + frame * SEQ_LEN), (Attention_Projected + frame * SEQ_LEN), (After_Attention_Residual + frame * SEQ_LEN));
             // copy_int_to_float((After_Attention_Residual + frame * SEQ_LEN), (X + frame * SEQ_LEN));
 
-            quantize_attention_heads_mp((Attention_Out + frame * NUM_HEADS), Attention_Out_Quant + frame * NUM_HEADS, Attention_Quant_Scales + frame);
-            concat_attention_heads_mp((Attention_Out_Quant + frame * NUM_HEADS), (Attention_Concat + frame * SEQ_LEN));
-            linear_quant_host_fp32_input_mp((Attention_Concat + frame * SEQ_LEN), Attention_Quant_Scales + frame, Wout, bout, scale_wout, (Attention_Projected + frame * SEQ_LEN));
-            residual_add_mp((X + frame * SEQ_LEN), (Attention_Projected + frame * SEQ_LEN), (After_Attention_Residual + frame * SEQ_LEN));
-            copy_int_to_float_mp((After_Attention_Residual + frame * SEQ_LEN), (X + frame * SEQ_LEN));
+            cl_event projection_wait_list[NUM_HEADS + 2];
+            for (int h = 0; h < NUM_HEADS; h++)
+                projection_wait_list[h] = A_exe_event[h];
+            projection_wait_list[NUM_HEADS] = Mem_op_event[4];
+            projection_wait_list[NUM_HEADS + 1] = Mem_op_event[5];
+
+            errCode = clEnqueueTask(Command_Queue, K_projection_out, NUM_HEADS + 2, projection_wait_list, &K_exe_event[2]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                    << "HOST-Error: Failed to submit projection_out for frame: "<< frame << ", block: " << block << endl
+                    << endl;
+                return EXIT_FAILURE;
+            }
+
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_After_Attention_Residual_Float[frame],
+                                                 CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[6]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                    << "Host-Error: Failed to migrate residual buffers for block " << block << endl
+                    << endl;
+                return EXIT_FAILURE;
+            }
+
+            cl_event residual_wait_list[] = {K_exe_event[2], Mem_op_event[6]};
+            errCode = clEnqueueTask(Command_Queue, K_residual, 2, residual_wait_list, &K_exe_event[3]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                    << "HOST-Error: Failed to submit attention residual for frame: "<< frame << ", block: " << block << endl
+                    << endl;
+                return EXIT_FAILURE;
+            }
+
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_After_Attention_Residual_Float[frame],
+                                                 CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[3], &Mem_op_event[9]);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                    << "Host-Error: Failed to copy attention residual result to host for block " << block << endl
+                    << endl;
+                return EXIT_FAILURE;
+            }
+            clWaitForEvents(1, &Mem_op_event[9]);
+
+            for (int i = 0; i < SEQ_LEN; i++)
+            {
+                for (int d = 0; d < EMBED_DIM; d++)
+                {
+                    int rounded = static_cast<int>(roundf(After_Attention_Residual_Float[frame * SEQ_LEN + i][d]));
+                    After_Attention_Residual[frame * SEQ_LEN + i][d] = rounded;
+                    X[frame * SEQ_LEN + i][d] = static_cast<float>(rounded);
+                }
+            }
 
             auto Host_Post_Mid = chrono::high_resolution_clock::now();
             Host_Post_Time_ms += chrono::duration<double, std::milli>(Host_Post_Mid - Host_Post_Start).count();
@@ -1761,28 +1917,9 @@ int main(int argc, char *argv[])
                     << endl;
                 return EXIT_FAILURE;
             }
-			
-            // ================ fix error temporary	===========
-            clSetUserEventStatus(wait_MLP_finish, CL_COMPLETE);
-
-            clGetEventInfo(wait_MLP_finish, CL_EVENT_COMMAND_EXECUTION_STATUS,
-            			               sizeof(status), &status, NULL);
-			cout << "wait_MLP_finish: ";
-			switch(status) {
-				case CL_QUEUED:    printf("QUEUED\n"); break;
-				case CL_SUBMITTED: printf("SUBMITTED\n"); break;
-				case CL_RUNNING:   printf("RUNNING\n"); break;
-				case CL_COMPLETE:  printf("COMPLETE\n"); break;
-				default:           printf("ERROR: %d\n", status); break;
-			}
-
-            clReleaseEvent(wait_MLP_finish);
-            cout << "-----get ready to compute LayerNorm1-----\n";
-            // ================================================
-
             errCode = false;
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 3, LayerNorm_Input_Buffers, 0, 1, &wait_MLP_finish, &Mem_op_event[5]);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 1, &wait_MLP_finish, &Mem_op_event[6]);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 3, LayerNorm_Input_Buffers, 0, 0, NULL, &Mem_op_event[10]);
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[11]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -1791,36 +1928,9 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
             
-            cl_event layernorm1_wait_list[] = {Mem_op_event[5], Mem_op_event[6]};
+            cl_event layernorm1_wait_list[] = {Mem_op_event[10], Mem_op_event[11]};
 
-            // ================ fix error temporary	===========
-			clGetEventInfo(Mem_op_event[5], CL_EVENT_COMMAND_EXECUTION_STATUS,
-									   sizeof(status), &status, NULL);
-			cout << "Mem_op_event[5]: ";
-			switch(status) {
-				case CL_QUEUED:    printf("QUEUED\n"); break;
-				case CL_SUBMITTED: printf("SUBMITTED\n"); break;
-				case CL_RUNNING:   printf("RUNNING\n"); break;
-				case CL_COMPLETE:  printf("COMPLETE\n"); break;
-				default:           printf("ERROR: %d\n", status); break;
-			}
-
-			clGetEventInfo(Mem_op_event[6], CL_EVENT_COMMAND_EXECUTION_STATUS,
-												   sizeof(status), &status, NULL);
-			cout << "Mem_op_event[6]: ";
-			switch(status) {
-				case CL_QUEUED:    printf("QUEUED\n"); break;
-				case CL_SUBMITTED: printf("SUBMITTED\n"); break;
-				case CL_RUNNING:   printf("RUNNING\n"); break;
-				case CL_COMPLETE:  printf("COMPLETE\n"); break;
-				default:           printf("ERROR: %d\n", status); break;
-			}
-            cout << "-----clEnqueueMigrateMemObjects LayerNorm inout buffer-----\n";
-			// ================================================
-
-            
-
-            errCode = clEnqueueTask(Command_Queue, K_layernorm[1], 2, layernorm1_wait_list, &K_exe_event[2]);
+            errCode = clEnqueueTask(Command_Queue, K_layernorm[1], 2, layernorm1_wait_list, &K_exe_event[4]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -1828,28 +1938,11 @@ int main(int argc, char *argv[])
                     << endl;
                 return EXIT_FAILURE;
             }
-            
-            // ================ fix error temporary	===========
-			clGetEventInfo(K_exe_event[2], CL_EVENT_COMMAND_EXECUTION_STATUS,
-			               sizeof(status), &status, NULL);
-			cout << "wait_SecondLayerNorm_finish: ";
-			switch(status) {
-			    case CL_QUEUED:    printf("QUEUED\n"); break;
-			    case CL_SUBMITTED: printf("SUBMITTED\n"); break;
-			    case CL_RUNNING:   printf("RUNNING\n"); break;
-			    case CL_COMPLETE:  printf("COMPLETE\n"); break;
-			    default:           printf("ERROR: %d\n", status); break;
-			}
-
-
-            cout << "-----get ready to compute LayerNorm1-----\n";
-            // ================================================
-
 
             //cl_event ln1_to_host_wait_list[] = {K_exe_event[2 + NUM_HEADS * FRAME]};
 
             // TODO: is it useless?
-            errCode = clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[2], &Mem_op_event[7]);
+            errCode = clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[4], &Mem_op_event[12]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -1857,8 +1950,8 @@ int main(int argc, char *argv[])
                     << endl;
                 return EXIT_FAILURE;
             }
-            clWaitForEvents(1, &Mem_op_event[7]);
-            clWaitForEvents(1, &K_exe_event[2]);
+            clWaitForEvents(1, &Mem_op_event[12]);
+            clWaitForEvents(1, &K_exe_event[4]);
 
             
             mlp_quant_host_mp((X_norm + frame * SEQ_LEN), (LayerNorm_scaler + frame * SEQ_LEN), MLP_W1, MLP_b1, MLP_scale_w1, MLP_W2, MLP_b2, MLP_scale_w2, (MLP_Output + frame * SEQ_LEN));
@@ -1887,6 +1980,10 @@ int main(int argc, char *argv[])
                 Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_attention_head_" + to_string(h));
             }
             Profiling_Kernel_Events.push_back(K_exe_event[2]);
+            Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_projection_out");
+            Profiling_Kernel_Events.push_back(K_exe_event[3]);
+            Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_attention_residual");
+            Profiling_Kernel_Events.push_back(K_exe_event[4]);
             Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_layernorm_1");
             Total_Kernel_Events += Nb_Of_Exe_Events;
         }
@@ -1982,10 +2079,15 @@ int main(int argc, char *argv[])
         clReleaseMemObject(GlobMem_BUF_frame_X[f]);
         clReleaseMemObject(GlobMem_BUF_frame_X_norm[f]);
         clReleaseMemObject(GlobMem_BUF_frame_LayerNorm_Scaler[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_Attention_Out[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_Attention_Projected[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_After_Attention_Residual_Float[f]);
     }
     clReleaseMemObject(GlobMem_BUF_X);
     clReleaseMemObject(GlobMem_BUF_X_norm);
     clReleaseMemObject(GlobMem_BUF_Attention_Out);
+    clReleaseMemObject(GlobMem_BUF_Attention_Projected);
+    clReleaseMemObject(GlobMem_BUF_After_Attention_Residual_Float);
 
     clReleaseMemObject(GlobMem_BUF_LayerNorm_Gamma);
     clReleaseMemObject(GlobMem_BUF_LayerNorm_Beta);
@@ -2000,6 +2102,9 @@ int main(int argc, char *argv[])
     clReleaseMemObject(GlobMem_BUF_Wv);
     clReleaseMemObject(GlobMem_BUF_bv);
     clReleaseMemObject(GlobMem_BUF_scale_wv);
+    clReleaseMemObject(GlobMem_BUF_Wout);
+    clReleaseMemObject(GlobMem_BUF_bout);
+    clReleaseMemObject(GlobMem_BUF_scale_wout);
     clReleaseMemObject(GlobMem_BUF_Q);
     clReleaseMemObject(GlobMem_BUF_K);
     clReleaseMemObject(GlobMem_BUF_V);
@@ -2009,6 +2114,8 @@ int main(int argc, char *argv[])
     clReleaseKernel(K_linear_qkv_multihead);
     for (int h = 0; h < NUM_HEADS; h++)
         clReleaseKernel(K_attention_opt[h]);
+    clReleaseKernel(K_projection_out);
+    clReleaseKernel(K_residual);
 
     clReleaseProgram(Program);
     clReleaseCommandQueue(Command_Queue);
@@ -2041,6 +2148,7 @@ int main(int argc, char *argv[])
     free(Attention_Out);
     free(Attention_Concat);
     free(Attention_Projected);
+    free(After_Attention_Residual_Float);
     free(After_Attention_Residual);
     // free(MLP_Input); unuse
     free(MLP_Output);

@@ -13,8 +13,8 @@ static float (*attention_in)[SEQ_LEN][HEAD_DIM];
 static int8_t (*weight)[EMBED_DIM];
 static float *bias;
 static float *scale_weight;
-static int (*out_hw)[EMBED_DIM];
-static int (*out_ref)[EMBED_DIM];
+static float (*out_hw)[EMBED_DIM];
+static float (*out_ref)[EMBED_DIM];
 
 static int load_file_to_memory(const char *filename, char **result)
 {
@@ -110,7 +110,7 @@ static void projection_ref()
             }
             const float dequant =
                 static_cast<float>(acc) * scale_input * scale_weight[o] + bias[o];
-            out_ref[token][o] = static_cast<int>(roundf(dequant));
+            out_ref[token][o] = dequant;
         }
     }
 }
@@ -137,10 +137,10 @@ int main(int argc, char **argv)
         aligned_alloc_t<int8_t>(EMBED_DIM * EMBED_DIM));
     bias = aligned_alloc_t<float>(EMBED_DIM);
     scale_weight = aligned_alloc_t<float>(EMBED_DIM);
-    out_hw = reinterpret_cast<int (*)[EMBED_DIM]>(
-        aligned_alloc_t<int>(SEQ_LEN * EMBED_DIM));
-    out_ref = reinterpret_cast<int (*)[EMBED_DIM]>(
-        aligned_alloc_t<int>(SEQ_LEN * EMBED_DIM));
+    out_hw = reinterpret_cast<float (*)[EMBED_DIM]>(
+        aligned_alloc_t<float>(SEQ_LEN * EMBED_DIM));
+    out_ref = reinterpret_cast<float (*)[EMBED_DIM]>(
+        aligned_alloc_t<float>(SEQ_LEN * EMBED_DIM));
 
     init_data();
     projection_ref();
@@ -322,7 +322,7 @@ int main(int argc, char **argv)
     }
     cl_mem buf_out = clCreateBuffer(
         Context, CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR,
-        SEQ_LEN * EMBED_DIM * sizeof(int), out_hw, &errCode);
+        SEQ_LEN * EMBED_DIM * sizeof(float), out_hw, &errCode);
     if (errCode != CL_SUCCESS) {
         cout << endl << "HOST-Error: Failed to allocate buf_out" << endl << endl;
         return EXIT_FAILURE;
@@ -396,18 +396,18 @@ int main(int argc, char **argv)
     cout << "HOST-Info: Waiting for application to be completed ..." << endl;
     clFinish(Command_Queue);
 
-    int max_err = 0;
+    float max_err = 0.0f;
     for (int i = 0; i < SEQ_LEN; i++) {
         for (int o = 0; o < EMBED_DIM; o++) {
-            int diff = std::abs(out_hw[i][o] - out_ref[i][o]);
+            float diff = std::fabs(out_hw[i][o] - out_ref[i][o]);
             if (diff > max_err) {
                 max_err = diff;
             }
         }
     }
 
-    cout << "HOST-Info: projection_out max int error = " << max_err << endl;
-    cout << ((max_err == 0) ? "PASS" : "FAIL") << endl;
+    cout << "HOST-Info: projection_out max fp32 error = " << max_err << endl;
+    cout << ((max_err <= 1.0e-5f) ? "PASS" : "FAIL") << endl;
 
     for (int i = 0; i < Nb_Of_Memory_Transfers; i++) {
         clReleaseEvent(Mem_op_event[i]);
@@ -434,5 +434,5 @@ int main(int argc, char **argv)
     free(out_hw);
     free(out_ref);
 
-    return (max_err == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
+    return (max_err <= 1.0e-5f) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -27,7 +27,7 @@ void project_tile(
     int o_tile,
     float bias[EMBED_DIM],
     float scale_weight[EMBED_DIM],
-    int out[SEQ_LEN][EMBED_DIM]);
+    float out[SEQ_LEN][EMBED_DIM]);
 
 // Clamp a value to the int8 range [-128, 127]
 static int8_t clamp_int8(int value)
@@ -51,7 +51,7 @@ extern "C"
         int8_t weight[EMBED_DIM][EMBED_DIM],
         float bias[EMBED_DIM],
         float scale_weight[EMBED_DIM],
-        int out[SEQ_LEN][EMBED_DIM]) // 197 x 768
+        float out[SEQ_LEN][EMBED_DIM]) // 197 x 768
     {
 #pragma HLS INTERFACE m_axi port = attention_in offset = slave bundle = gmem0 max_widen_bitwidth = 256 // memory access 256 bits at a time (32 int8 values)
 #pragma HLS INTERFACE m_axi port = out offset = slave bundle = gmem1 max_widen_bitwidth = 256
@@ -193,7 +193,7 @@ void project_tile(
     int o_tile,
     float bias[EMBED_DIM],
     float scale_weight[EMBED_DIM],
-    int out[SEQ_LEN][EMBED_DIM])
+    float out[SEQ_LEN][EMBED_DIM])
 {
 #pragma HLS INLINE off
 
@@ -242,7 +242,7 @@ token_loop:
             const float dequant =
                 static_cast<float>(acc) * scale_input[token] * scale_weight[out_col] +
                 bias[out_col];
-            out[token][out_col] = static_cast<int>(roundf(dequant));
+            out[token][out_col] = dequant;
         }
     }
 }
