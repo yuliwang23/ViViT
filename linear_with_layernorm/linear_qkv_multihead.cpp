@@ -294,7 +294,7 @@ void layernorm_compute(
 
     seq_loop:
     for(int i = 0; i < SEQ_LEN; i++){
-        #pragma HLS DATAFLOW 
+        // #pragma HLS DATAFLOW 
         #pragma HLS stable variable=SRAM_gamma
         #pragma HLS stable variable=SRAM_beta
         #pragma HLS stable variable=scaler
@@ -341,29 +341,29 @@ void load_Bias_HBM2BRAM(
     }
 }
 
-void load_Weight_tile_FIFO2URAM(
-    hls::stream<uint256_dt> &FIFO_W,
-    int64_dt URAM_W[TILE_SIZE][EMBED_DIM_package]
-) {
-    #pragma HLS ARRAY_PARTITION variable=URAM_W type=cyclic factor=2 dim=1
-    #pragma HLS BIND_STORAGE variable=URAM_W type=ram_2p impl=uram
+// void load_Weight_tile_FIFO2URAM(
+//     hls::stream<uint256_dt> &FIFO_W,
+//     int64_dt URAM_W[TILE_SIZE][EMBED_DIM_package]
+// ) {
+//     #pragma HLS ARRAY_PARTITION variable=URAM_W type=cyclic factor=2 dim=1
+//     #pragma HLS BIND_STORAGE variable=URAM_W type=ram_2p impl=uram
 
-    load_local_row:
-    for (int i = 0; i < TILE_SIZE; i++) { 
-        load_local_col:
-        for (int j = 0; j < 24; j++) {
-            #pragma HLS PIPELINE II=4
-            uint256_dt temp_chunk = FIFO_W.read();
-            unpack_loop:
-            for (int k = 0; k < 4; k++) {
-                #pragma HLS UNROLL
-                int start_bit = k * 64;
-                int end_bit = start_bit + 63;
-                URAM_W[i][j * 4 + k] = temp_chunk.range(end_bit, start_bit);
-            }
-        }
-    }
-}
+//     load_local_row:
+//     for (int i = 0; i < TILE_SIZE; i++) { 
+//         load_local_col:
+//         for (int j = 0; j < 24; j++) {
+//             #pragma HLS PIPELINE II=4
+//             uint256_dt temp_chunk = FIFO_W.read();
+//             unpack_loop:
+//             for (int k = 0; k < 4; k++) {
+//                 #pragma HLS UNROLL
+//                 int start_bit = k * 64;
+//                 int end_bit = start_bit + 63;
+//                 URAM_W[i][j * 4 + k] = temp_chunk.range(end_bit, start_bit);
+//             }
+//         }
+//     }
+// }
 
 void load_All_Weights_Parallel(
     hls::stream<uint256_dt> &FIFO_Wq,
@@ -373,10 +373,28 @@ void load_All_Weights_Parallel(
     int64_dt URAM_Wk[TILE_SIZE][EMBED_DIM_package], 
     int64_dt URAM_Wv[TILE_SIZE][EMBED_DIM_package]
 ) {
-    #pragma HLS DATAFLOW
-    load_Weight_tile_FIFO2URAM(FIFO_Wq, URAM_Wq);
-    load_Weight_tile_FIFO2URAM(FIFO_Wk, URAM_Wk);
-    load_Weight_tile_FIFO2URAM(FIFO_Wv, URAM_Wv);
+    #pragma HLS INLINE off
+    load_local_row:
+    for (int i = 0; i < TILE_SIZE; i++) { 
+        load_local_col:
+        for (int j = 0; j < 24; j++) {
+            #pragma HLS PIPELINE II=4
+            
+            uint256_dt q_chunk = FIFO_Wq.read();
+            uint256_dt k_chunk = FIFO_Wk.read();
+            uint256_dt v_chunk = FIFO_Wv.read();
+            
+            unpack_loop:
+            for (int k = 0; k < 4; k++) {
+                #pragma HLS UNROLL
+                int start_bit = k * 64;
+                int end_bit = start_bit + 63;
+                URAM_Wq[i][j * 4 + k] = q_chunk.range(end_bit, start_bit);
+                URAM_Wk[i][j * 4 + k] = k_chunk.range(end_bit, start_bit);
+                URAM_Wv[i][j * 4 + k] = v_chunk.range(end_bit, start_bit);
+            }
+        }
+    }
 }
 
 void compute_linear_qkv_one_head(
