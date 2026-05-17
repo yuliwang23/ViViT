@@ -73,7 +73,7 @@ void linear_qkv_multihead(
     #pragma HLS ARRAY_PARTITION variable=SRAM_swk dim=1 type=cyclic factor=8
     #pragma HLS ARRAY_PARTITION variable=SRAM_swv dim=1 type=cyclic factor=8
 
-    int64_dt X_package[SEQ_LEN][EMBED_DIM_package];
+    static int64_dt X_package[SEQ_LEN][EMBED_DIM_package];
     float scaler_X[SEQ_LEN];
     #pragma HLS ARRAY_PARTITION variable=X_package type=cyclic factor=2 dim=2
     #pragma HLS BIND_STORAGE variable=X_package type=ram_2p impl=uram
@@ -91,7 +91,9 @@ void linear_qkv_multihead(
     {
         #pragma HLS DATAFLOW
         hls::stream<uint256_dt> FIFO_X("FIFO_X");
+#ifdef __SYNTHESIS__
         #pragma HLS STREAM variable=FIFO_X depth=32
+#endif
         
         load_X_HBM2FIFO(x, FIFO_X);
         layernorm_compute(FIFO_X, scaler_X, SRAM_gamma, SRAM_beta, X_package);
@@ -108,13 +110,14 @@ void linear_qkv_multihead(
         hls::stream<uint256_dt> FIFO_K("FIFO_K");
         hls::stream<uint256_dt> FIFO_V("FIFO_V");
 
+#ifdef __SYNTHESIS__
         #pragma HLS STREAM variable=FIFO_Wq depth=32
         #pragma HLS STREAM variable=FIFO_Wk depth=32
         #pragma HLS STREAM variable=FIFO_Wv depth=32
         #pragma HLS STREAM variable=FIFO_Q depth=32
         #pragma HLS STREAM variable=FIFO_K depth=32
         #pragma HLS STREAM variable=FIFO_V depth=32
-
+#endif
 
         load_Weight_tile_HBM2FIFO(Wq, FIFO_Wq, iter * TILE_SIZE);
         load_Weight_tile_HBM2FIFO(Wk, FIFO_Wk, iter * TILE_SIZE);
@@ -289,6 +292,7 @@ void compute_mean_variance(
             #pragma HLS UNROLL
             int idx = j + k;
             float scaled_val = norm_buffer[idx] * scale; 
+            scaled_val = std::max(-128.0f, std::min(127.0f, std::round(scaled_val)));
             int8_dt q_val = static_cast<int8_dt>(std::round(scaled_val)); 
             
             int bit_offset = (k % 8) * 8; 
@@ -425,9 +429,9 @@ void compute_linear_qkv_one_head(
 ){
     #pragma HLS INLINE off
 
-    int64_dt URAM_Wq[TILE_SIZE][EMBED_DIM_package];
-    int64_dt URAM_Wk[TILE_SIZE][EMBED_DIM_package];
-    int64_dt URAM_Wv[TILE_SIZE][EMBED_DIM_package];
+    static int64_dt URAM_Wq[TILE_SIZE][EMBED_DIM_package];
+    static int64_dt URAM_Wk[TILE_SIZE][EMBED_DIM_package];
+    static int64_dt URAM_Wv[TILE_SIZE][EMBED_DIM_package];
 
     int26_dt BRAM_Acc_Q[TILE_SIZE];
     int26_dt BRAM_Acc_K[TILE_SIZE];
