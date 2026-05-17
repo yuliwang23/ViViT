@@ -112,10 +112,10 @@ void load_Bias_HBM2BRAM(
     float BRAM_b[EMBED_DIM]
 );
 
-void load_Weight_tile_FIFO2URAM(
-    hls::stream<uint256_dt> &FIFO_W,
-    int64_dt URAM_W[TILE_SIZE][EMBED_DIM_package]
-);
+// void load_Weight_tile_FIFO2URAM(
+//     hls::stream<uint256_dt> &FIFO_W,
+//     int64_dt URAM_W[TILE_SIZE][EMBED_DIM_package]
+// );
 
 void load_All_Weights_Parallel(
     hls::stream<uint256_dt> &FIFO_Wq,

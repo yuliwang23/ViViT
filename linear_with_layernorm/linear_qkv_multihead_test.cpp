@@ -17,9 +17,6 @@ union FloatInt {
     uint32_t i;
 };
 
-// ============================================================================
-// Initialization & Quantization Helpers
-// ============================================================================
 void quantize_weight_per_channel(
     float W_fp32[EMBED_DIM][EMBED_DIM],
     int8_t W_int8[EMBED_DIM][EMBED_DIM],
@@ -40,9 +37,6 @@ void quantize_weight_per_channel(
     }
 }
 
-// ============================================================================
-// Golden Reference 
-// ============================================================================
 void linear_qkv_golden(
     float X_fp32[SEQ_LEN][EMBED_DIM],
     float gamma[EMBED_DIM], float beta[EMBED_DIM],
@@ -54,7 +48,6 @@ void linear_qkv_golden(
     float V[NUM_HEADS][SEQ_LEN][HEAD_DIM])
 {
     for (int i = 0; i < SEQ_LEN; i++) {
-        // --- 1. LayerNorm (完全對齊硬體的 Block-based Welford 演算法) ---
         float global_mean = 0.0f; 
         float M2AB = 0.0f;
 
@@ -100,7 +93,6 @@ void linear_qkv_golden(
             X_int8[j] = static_cast<int8_t>(scaled_val);
         }
 
-        // --- 3. QKV GEMM ---
         for (int j = 0; j < EMBED_DIM; j++) {
             int32_t acc_q = 0, acc_k = 0, acc_v = 0;
             for (int k = 0; k < EMBED_DIM; k++) {
@@ -121,9 +113,6 @@ void linear_qkv_golden(
     }
 }
 
-// ============================================================================
-// Main Simulation Testbench
-// ============================================================================
 int main() {
     srand(42); 
 
@@ -133,9 +122,15 @@ int main() {
     static float h_Wq_fp32[EMBED_DIM][EMBED_DIM], h_Wk_fp32[EMBED_DIM][EMBED_DIM], h_Wv_fp32[EMBED_DIM][EMBED_DIM];
     static int8_t h_Wq[EMBED_DIM][EMBED_DIM], h_Wk[EMBED_DIM][EMBED_DIM], h_Wv[EMBED_DIM][EMBED_DIM];
     static int8_t h_Wq_T[EMBED_DIM][EMBED_DIM], h_Wk_T[EMBED_DIM][EMBED_DIM], h_Wv_T[EMBED_DIM][EMBED_DIM];
-    static float h_bq[EMBED_DIM], h_bk[EMBED_DIM], h_bv[EMBED_DIM];
-    static float h_sq[EMBED_DIM], h_sk[EMBED_DIM], h_sv[EMBED_DIM];
-    static float h_gamma[EMBED_DIM], h_beta[EMBED_DIM];
+    
+    alignas(32) static float h_bq[EMBED_DIM];
+    alignas(32) static float h_bk[EMBED_DIM];
+    alignas(32) static float h_bv[EMBED_DIM];
+    alignas(32) static float h_sq[EMBED_DIM];
+    alignas(32) static float h_sk[EMBED_DIM];
+    alignas(32) static float h_sv[EMBED_DIM];
+    alignas(32) static float h_gamma[EMBED_DIM];
+    alignas(32) static float h_beta[EMBED_DIM];
 
     static float h_Q_opt[NUM_HEADS][SEQ_LEN][HEAD_DIM];
     static float h_K_opt[NUM_HEADS][SEQ_LEN][HEAD_DIM];
@@ -147,13 +142,13 @@ int main() {
     const int PACK_INT8 = 256 / 8;   
     const int PACK_FLOAT = 256 / 32; 
 
-    static uint256_dt packed_X[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT]; 
-    static uint256_dt packed_Wq[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
-    static uint256_dt packed_Wk[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
-    static uint256_dt packed_Wv[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
-    static uint256_dt packed_Q[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
-    static uint256_dt packed_K[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
-    static uint256_dt packed_V[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
+    alignas(32) static uint256_dt packed_X[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT]; 
+    alignas(32) static uint256_dt packed_Wq[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
+    alignas(32) static uint256_dt packed_Wk[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
+    alignas(32) static uint256_dt packed_Wv[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
+    alignas(32) static uint256_dt packed_Q[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
+    alignas(32) static uint256_dt packed_K[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
+    alignas(32) static uint256_dt packed_V[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
 
     cout << "Initializing random data..." << endl;
     for (int i = 0; i < SEQ_LEN; i++) {
@@ -173,7 +168,7 @@ int main() {
         h_bk[i] = -1.0f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 2.0f));
         h_bv[i] = -1.0f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 2.0f));
         h_gamma[i] = 1.0f;
-        h_beta[i]  = 0.0f;
+        h_beta[i]   = 0.0f;
     }
     
     quantize_weight_per_channel(h_Wq_fp32, h_Wq, h_sq);
@@ -191,7 +186,6 @@ int main() {
     cout << "Calculating Golden Reference..." << endl;
     linear_qkv_golden(h_X_fp32, h_gamma, h_beta, h_Wq, h_bq, h_sq, h_Wk, h_bk, h_sk, h_Wv, h_bv, h_sv, h_Q_ref, h_K_ref, h_V_ref);
 
-    // ========================================================================
     cout << "Packing data for Hardware Kernel..." << endl;
     int pack_idx = 0;
     for (int i = 0; i < SEQ_LEN; i++) {
@@ -222,8 +216,8 @@ int main() {
         }
     }
 
-    static uint256_dt packed_gamma[EMBED_DIM / PACK_FLOAT];
-    static uint256_dt packed_beta[EMBED_DIM / PACK_FLOAT];
+    alignas(32) static uint256_dt packed_gamma[EMBED_DIM / PACK_FLOAT];
+    alignas(32) static uint256_dt packed_beta[EMBED_DIM / PACK_FLOAT];
     FloatInt f_one, f_zero;
     f_one.f = 1.0f; f_zero.f = 0.0f;
     for(int i = 0; i < EMBED_DIM / PACK_FLOAT; i++) {
@@ -232,29 +226,28 @@ int main() {
             word_g((k + 1) * 32 - 1, k * 32) = f_one.i;
             word_b((k + 1) * 32 - 1, k * 32) = f_zero.i;
         }
-        packed_gamma[i] = word_g; packed_beta[i]  = word_b;
+        packed_gamma[i] = word_g; packed_beta[i] = word_b;
     }
 
     cout << "Running HLS Kernel Simulation..." << endl;
     linear_qkv_multihead(
-        packed_X,       // 1
-        packed_gamma,   // 2
-        packed_beta,    // 3
-        packed_Wk,      // 4
-        packed_Wv,      // 5
-        packed_Wq,      // 6
-        h_bq,           // 7
-        h_bk,           // 8
-        h_bv,           // 9
-        h_sq,           // 10
-        h_sk,           // 11
-        h_sv,           // 12
-        packed_Q,       // 13
-        packed_K,       // 14
-        packed_V        // 15
+        packed_X,
+        packed_gamma,
+        packed_beta,
+        packed_Wk,
+        packed_Wv,
+        packed_Wq,
+        h_bq,
+        h_bk,
+        h_bv,
+        h_sq,
+        h_sk,
+        h_sv,
+        packed_Q,
+        packed_K,
+        packed_V
     );
 
-    // ========================================================================
     cout << "Unpacking Results..." << endl;
     pack_idx = 0;
     for (int i = 0; i < SEQ_LEN; i++) {
@@ -292,8 +285,7 @@ int main() {
                 float diff_q = fabs(h_Q_ref[h][i][d] - h_Q_opt[h][i][d]);
                 if (diff_q > max_err) max_err = diff_q;
                 if (diff_q > TOLERANCE) {
-                    // if (err_cnt < 5) 
-                        printf("Mismatch at Q[%d][%d][%d]: Ref=%f, Opt=%f (diff=%f)\n", h, i, d, h_Q_ref[h][i][d], h_Q_opt[h][i][d], diff_q);
+                    printf("Mismatch at Q[%d][%d][%d]: Ref=%f, Opt=%f (diff=%f)\n", h, i, d, h_Q_ref[h][i][d], h_Q_opt[h][i][d], diff_q);
                     err_cnt++;
                 }
             }
