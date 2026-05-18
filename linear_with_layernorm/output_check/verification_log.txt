@@ -1,0 +1,59 @@
+=== Hardware vs Software Verification Log ===
+Error Tolerance        : 0.01
+
+>>> Verifying Tensor: Q <<<
+Golden Reference File : Q_output_golden.txt
+Hardware Output File  : Q_output.txt
+    Mismatch at index 55633 | Golden: 2.256499 | HW: 2.268570 | Diff: 0.012071
+    Mismatch at index 55679 | Golden: 2.668556 | HW: 2.656980 | Diff: 0.011576
+    Mismatch at index 58180 | Golden: -5.391885 | HW: -5.379240 | Diff: 0.012645
+    Mismatch at index 58190 | Golden: 22.440948 | HW: 22.453300 | Diff: 0.012352
+    Mismatch at index 58192 | Golden: -6.926237 | HW: -6.914610 | Diff: 0.011627
+    Mismatch at index 58208 | Golden: -3.687192 | HW: -3.697720 | Diff: 0.010528
+    Mismatch at index 58211 | Golden: 10.874519 | HW: 10.885000 | Diff: 0.010481
+    Mismatch at index 58219 | Golden: -23.244427 | HW: -23.257401 | Diff: 0.012974
+-------------------------------------------------
+Report for Q:
+Total Elements Checked : 151296 / 151296
+Maximum Absolute Error : 0.012974
+Mean Squared Error(MSE): 0.000000
+Mismatch Count         : 8 elements exceeded tolerance (0.010000)
+[FAILED] Q Verification failed. Hardware output has discrepancies.
+-------------------------------------------------
+
+
+>>> Verifying Tensor: K <<<
+Golden Reference File : K_output_golden.txt
+Hardware Output File  : K_output.txt
+    Mismatch at index 55633 | Golden: 6.652907 | HW: 6.670130 | Diff: 0.017223
+    Mismatch at index 55679 | Golden: 0.889440 | HW: 0.878343 | Diff: 0.011097
+    Mismatch at index 58180 | Golden: -5.583107 | HW: -5.573090 | Diff: 0.010017
+    Mismatch at index 58190 | Golden: 19.127998 | HW: 19.138901 | Diff: 0.010902
+    Mismatch at index 58192 | Golden: -5.558732 | HW: -5.548530 | Diff: 0.010202
+    Mismatch at index 58208 | Golden: -6.959383 | HW: -6.970180 | Diff: 0.010797
+    Mismatch at index 58219 | Golden: -19.619932 | HW: -19.630301 | Diff: 0.010368
+-------------------------------------------------
+Report for K:
+Total Elements Checked : 151296 / 151296
+Maximum Absolute Error : 0.017223
+Mean Squared Error(MSE): 0.000000
+Mismatch Count         : 7 elements exceeded tolerance (0.010000)
+[FAILED] K Verification failed. Hardware output has discrepancies.
+-------------------------------------------------
+
+
+>>> Verifying Tensor: V <<<
+Golden Reference File : V_output_golden.txt
+Hardware Output File  : V_output.txt
+-------------------------------------------------
+Report for V:
+Total Elements Checked : 151296 / 151296
+Maximum Absolute Error : 0.004683
+Mean Squared Error(MSE): 0.000000
+Mismatch Count         : 0 elements exceeded tolerance (0.010000)
+[SUCCESS] V Hardware output matches Golden reference perfectly!
+-------------------------------------------------
+
+=================================================
+FINAL RESULT: ONE OR MORE TENSORS FAILED!
+=================================================
