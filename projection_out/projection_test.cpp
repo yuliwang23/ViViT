@@ -51,8 +51,9 @@ static void projection_ref()
                 acc += static_cast<int32_t>(q_token[d]) *
                        static_cast<int32_t>(weight[d][o]);
             }
-            out_ref[token][o] =
+            const float dequant =
                 static_cast<float>(acc) * scale_input * scale_weight[o] + bias[o];
+            out_ref[token][o] = dequant;
         }
     }
 }
@@ -92,8 +93,8 @@ int main()
         }
     }
 
-    std::printf("projection_out max error = %.8f\n", max_err);
-    if (max_err > 1e-5f) {
+    std::printf("projection_out max fp32 error = %.8f\n", max_err);
+    if (max_err > 1.0e-5f) {
         std::printf("FAIL\n");
         return 1;
     }
