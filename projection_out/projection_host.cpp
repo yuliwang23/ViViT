@@ -1,5 +1,3 @@
-#include "projection.h"
-
 #include <CL/cl.h>
 #include <cmath>
 #include <cstdlib>
@@ -7,7 +5,16 @@
 #include <fstream>
 #include <iostream>
 
+#include "help_functions.h"
+
 using namespace std;
+
+// Host-side mirror of projection_out dimensions. Keep these in sync with
+// projection.h when changing the kernel configuration.
+constexpr int SEQ_LEN = 4;
+constexpr int EMBED_DIM = 64;
+constexpr int NUM_HEADS = 2;
+constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS;
 
 static float (*attention_in)[SEQ_LEN][HEAD_DIM];
 static int8_t (*weight)[EMBED_DIM];
@@ -15,22 +22,6 @@ static float *bias;
 static float *scale_weight;
 static float (*out_hw)[EMBED_DIM];
 static float (*out_ref)[EMBED_DIM];
-
-static int load_file_to_memory(const char *filename, char **result)
-{
-    ifstream stream(filename, ifstream::binary);
-    if (!stream) {
-        return -1;
-    }
-
-    stream.seekg(0, stream.end);
-    int size = static_cast<int>(stream.tellg());
-    stream.seekg(0, stream.beg);
-
-    *result = new char[size];
-    stream.read(*result, size);
-    return stream ? size : -2;
-}
 
 template <typename T>
 static T *aligned_alloc_t(size_t count)
@@ -264,7 +255,7 @@ int main(int argc, char **argv)
     }
 
     char *binary = nullptr;
-    const int binary_size = load_file_to_memory(xclbinFilename, &binary);
+    const int binary_size = loadFile2Memory(xclbinFilename, &binary);
     if (binary_size < 0) {
         cout << endl << "HOST-Error: Failed to load " << xclbinFilename << " binary file to memory" << endl << endl;
         return EXIT_FAILURE;
@@ -408,6 +399,10 @@ int main(int argc, char **argv)
 
     cout << "HOST-Info: projection_out max fp32 error = " << max_err << endl;
     cout << ((max_err <= 1.0e-5f) ? "PASS" : "FAIL") << endl;
+
+    string list_of_kernel_names[Nb_Of_Kernels] = {"projection_out"};
+    run_custom_profiling(Nb_Of_Kernels, Nb_Of_Memory_Transfers,
+                         K_exe_event, Mem_op_event, list_of_kernel_names);
 
     for (int i = 0; i < Nb_Of_Memory_Transfers; i++) {
         clReleaseEvent(Mem_op_event[i]);
