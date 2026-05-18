@@ -5,7 +5,7 @@
 #include <ctime>
 #include <algorithm>
 #include <cfloat>
-#include "layernorm.h"
+#include "layernorm_scaler.h"
 
 using namespace std;
 
@@ -25,8 +25,6 @@ void init_vector_float(float vec[], int size) {
     }
 }
 
-// ─── Golden Reference ───
-// 模擬 LayerNorm 的計算過程並提取 Golden Scaler
 void layernorm_golden(
     float x[SEQ_LEN][EMBED_DIM],
     float gamma[EMBED_DIM],
@@ -38,13 +36,11 @@ void layernorm_golden(
         float mean = 0.0f;
         float var = 0.0f;
 
-        // 1. 計算 Mean
         for (int j = 0; j < EMBED_DIM; j++) {
             mean += x[i][j];
         }
         mean /= EMBED_DIM;
 
-        // 2. 計算 Variance
         for (int j = 0; j < EMBED_DIM; j++) {
             float diff = x[i][j] - mean;
             var += diff * diff;
@@ -78,7 +74,6 @@ void layernorm_golden(
 int main() {
     srand(42);
 
-    // 分配記憶體 (使用 static 避免 stack overflow)
     static float h_x[SEQ_LEN][EMBED_DIM];
     static float h_gamma[EMBED_DIM];
     static float h_beta[EMBED_DIM];
@@ -93,15 +88,12 @@ int main() {
     init_vector_float(h_gamma, EMBED_DIM);
     init_vector_float(h_beta, EMBED_DIM);
 
-    // 1. 執行 Golden Reference
     cout << "Calculating Golden Reference..." << endl;
     layernorm_golden(h_x, h_gamma, h_beta, h_out_ref, h_scaler_ref);
 
-    // 2. 執行 HLS Kernel
     cout << "Running HLS Kernel..." << endl;
     layernorm(h_x, h_gamma, h_beta, h_out_hls, h_scaler_hls);
 
-    // 3. 比對 Scaler 結果
     float max_scaler_err = 0.0f;
     int scaler_err_cnt = 0;
     const float TOLERANCE = 1e-4;
@@ -120,7 +112,6 @@ int main() {
         }
     }
 
-    // 4. 比對量化後的輸出 (int8)
     int out_err_cnt = 0;
     for (int i = 0; i < SEQ_LEN; i++) {
         for (int j = 0; j < EMBED_DIM; j++) {
@@ -141,5 +132,6 @@ int main() {
         printf("FAILED!\n");
     }
 
-    return (scaler_err_cnt == 0) ? 0 : 1;
+    bool passed = (scaler_err_cnt == 0) && (out_err_cnt < (SEQ_LEN * EMBED_DIM * 0.01));
+    return passed ? 0 : 1;
 }
