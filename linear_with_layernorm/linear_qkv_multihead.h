@@ -104,7 +104,7 @@ void load_beta_gamma_HBM2SRAM(
 void load_Weight_tile_HBM2FIFO(
     uint256_dt *W,
     hls::stream<uint256_dt> &FIFO_W,
-    int row_offset
+    int iter
 );
 
 void load_Bias_HBM2BRAM(
@@ -112,10 +112,10 @@ void load_Bias_HBM2BRAM(
     float BRAM_b[EMBED_DIM]
 );
 
-void load_Weight_tile_FIFO2URAM(
-    hls::stream<uint256_dt> &FIFO_W,
-    int64_dt URAM_W[TILE_SIZE][EMBED_DIM_package]
-);
+// void load_Weight_tile_FIFO2URAM(
+//     hls::stream<uint256_dt> &FIFO_W,
+//     int64_dt URAM_W[TILE_SIZE][EMBED_DIM_package]
+// );
 
 void load_All_Weights_Parallel(
     hls::stream<uint256_dt> &FIFO_Wq,
@@ -131,8 +131,9 @@ void compute_mean_variance(
     float BRAM_X[EMBED_DIM],
     float gamma[EMBED_DIM],
     float beta[EMBED_DIM],
-    float *scaler,
-    int64_dt X_package[EMBED_DIM_package]
+    float scaler_array[SEQ_LEN],
+    int64_dt X_package_array[SEQ_LEN][EMBED_DIM_package],
+    int seq_idx
 );
 
 void layernorm_compute(
@@ -171,3 +172,21 @@ void store_QKV_FIFO2HBM(
     uint256_dt *V,
     int iter
 );
+
+void do_layernorm_dataflow(
+    uint256_dt *x,
+    float SRAM_gamma[EMBED_DIM],
+    float SRAM_beta[EMBED_DIM],
+    float scaler_X[SEQ_LEN],
+    int64_dt X_package[SEQ_LEN][EMBED_DIM_package]
+) ;
+
+void process_single_tile(
+    int64_dt X_package[SEQ_LEN][EMBED_DIM_package],
+    uint256_dt *Wq, uint256_dt *Wk, uint256_dt *Wv,
+    uint256_dt *Q,  uint256_dt *K,  uint256_dt *V,
+    float SRAM_bq[EMBED_DIM], float SRAM_bk[EMBED_DIM], float SRAM_bv[EMBED_DIM],
+    float SRAM_swq[EMBED_DIM], float SRAM_swk[EMBED_DIM], float SRAM_swv[EMBED_DIM],
+    float scaler_X[SEQ_LEN],
+    int iter
+) ;
