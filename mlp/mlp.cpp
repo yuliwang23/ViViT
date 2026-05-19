@@ -4,17 +4,21 @@
 extern "C" {
 void mlp_q(
     uint256_dt *input,
+    float      *input_scaler,
     uint256_dt *W1,
     uint256_dt *W2,
     float      *b1,
     float      *b2,
     float      *scale_w1,
     float      *scale_w2,
-    uint256_dt *output)
+    uint256_dt *output,
+    int         token_offset,
+    int         valid_seq_len)
 {
 #pragma HLS BIND_STORAGE variable=GELU_LUT type=rom_1p impl=lutram
 // m_axi depths sized for the production GPT-2 small MLP:
-//   input/output: SEQ_LEN * EMBED_DIM / 8         = 64 * 768  / 8  = 6144
+//   input:        197 * EMBED_DIM / 32            = 197 * 768 / 32 = 4728
+//   output:       197 * EMBED_DIM / 8             = 197 * 768 / 8  = 18912
 //   W1:           HIDDEN_DIM * EMBED_DIM  / 32    = 3072 * 768/ 32 = 73728
 //   W2:           EMBED_DIM  * HIDDEN_DIM / 32    = 768  * 3072/32 = 73728
 //   b1,sw1:       HIDDEN_DIM                       = 3072
@@ -22,8 +26,9 @@ void mlp_q(
 // These depths are needed for cosim to allocate the correct AXI
 // memory model size, otherwise the testbench writes past the end
 // and SIGSEGVs inside CALL_C_DUT.
-#pragma HLS INTERFACE m_axi port=input    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=6144
-#pragma HLS INTERFACE m_axi port=output   offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=6144
+#pragma HLS INTERFACE m_axi port=input    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=4728
+#pragma HLS INTERFACE m_axi port=input_scaler offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=197
+#pragma HLS INTERFACE m_axi port=output   offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=18912
 #pragma HLS INTERFACE m_axi port=W1       offset=slave bundle=gmem1 max_widen_bitwidth=256 depth=73728
 #pragma HLS INTERFACE m_axi port=W2       offset=slave bundle=gmem2 max_widen_bitwidth=256 depth=73728
 #pragma HLS INTERFACE m_axi port=b1       offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=3072
@@ -32,6 +37,7 @@ void mlp_q(
 #pragma HLS INTERFACE m_axi port=scale_w2 offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=768
 
 #pragma HLS INTERFACE s_axilite port=input    bundle=control
+#pragma HLS INTERFACE s_axilite port=input_scaler bundle=control
 #pragma HLS INTERFACE s_axilite port=output   bundle=control
 #pragma HLS INTERFACE s_axilite port=W1       bundle=control
 #pragma HLS INTERFACE s_axilite port=W2       bundle=control
@@ -39,6 +45,8 @@ void mlp_q(
 #pragma HLS INTERFACE s_axilite port=b2       bundle=control
 #pragma HLS INTERFACE s_axilite port=scale_w1 bundle=control
 #pragma HLS INTERFACE s_axilite port=scale_w2 bundle=control
+#pragma HLS INTERFACE s_axilite port=token_offset bundle=control
+#pragma HLS INTERFACE s_axilite port=valid_seq_len bundle=control
 #pragma HLS INTERFACE s_axilite port=return   bundle=control
 
     int64_dt X_package[SEQ_LEN][EMBED_DIM_package];
@@ -69,29 +77,27 @@ void mlp_q(
     load_Bias_HBM2BRAM(scale_w1, SRAM_sw1, HIDDEN_DIM);
     load_Bias_HBM2BRAM(scale_w2, SRAM_sw2, EMBED_DIM );
 
-    // Stage 1:  quantize input
+    // Stage 1: load pre-quantized LayerNorm output directly.
     //   (No DATAFLOW / FIFO — read HBM directly into row buffer.
     //    The previous DATAFLOW version deadlocked on hardware because
     //    the producer wrote 6144 chunks into a depth-32 FIFO while the
     //    consumer was a plain loop, not a separate dataflow process.)
-    seq_quant_loop:
+    seq_load_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
-        float row_fp[EMBED_DIM];
-#pragma HLS ARRAY_PARTITION variable=row_fp type=cyclic factor=16
+        int source_token = token_offset + i;
+        bool valid_token = (source_token < valid_seq_len);
+        scaler_X[i] = valid_token ? input_scaler[source_token] : 1.0f;
 
         unpack_row:
-        for (int j = 0; j < EMBED_DIM_package; j++) {
+        for (int j = 0; j < EMBED_DIM / 32; j++) {
 #pragma HLS PIPELINE II=1
-            uint256_dt chunk = input[i * EMBED_DIM_package + j];
-            for (int k = 0; k < 8; k++) {
+            uint256_dt chunk = valid_token ? input[source_token * (EMBED_DIM / 32) + j] : (uint256_dt)0;
+            for (int k = 0; k < 4; k++) {
 #pragma HLS UNROLL
-                int s = k * 32, e = s + 31;
-                uint32_t raw = chunk.range(e, s);
-                union { uint32_t i; float f; } cv; cv.i = raw;
-                row_fp[j * 8 + k] = cv.f;
+                int s = k * 64, e = s + 63;
+                X_package[i][j * 4 + k] = chunk.range(e, s);
             }
         }
-        quantize_row_dynamic(row_fp, X_package[i], EMBED_DIM, &scaler_X[i]);
     }
 
     // Stage 2:  Dense_0 + GELU + (running-max + stash)
@@ -163,7 +169,7 @@ void mlp_q(
             FIFO_OUT,
             iter);
 
-        store_Output_FIFO2HBM(FIFO_OUT, output, iter);
+        store_Output_FIFO2HBM(FIFO_OUT, output, iter, token_offset, valid_seq_len);
     }
 }
 } // extern "C"
@@ -482,7 +488,9 @@ void dense1_one_tile(
 void store_Output_FIFO2HBM(
     hls::stream<uint256_dt> &FIFO_OUT,
     uint256_dt *output,
-    int tile_idx)
+    int tile_idx,
+    int token_offset,
+    int valid_seq_len)
 {
     int chunks_per_tile = TILE_SIZE / 8;
     int tile_offset     = tile_idx * chunks_per_tile;
@@ -490,11 +498,16 @@ void store_Output_FIFO2HBM(
 
     store_seq:
     for (int i = 0; i < SEQ_LEN; i++) {
+        int source_token = token_offset + i;
+        bool valid_token = (source_token < valid_seq_len);
         store_tile:
         for (int j = 0; j < chunks_per_tile; j++) {
 #pragma HLS PIPELINE II=1
-            int idx = i * chunks_per_row + tile_offset + j;
-            output[idx] = FIFO_OUT.read();
+            uint256_dt chunk = FIFO_OUT.read();
+            if (valid_token) {
+                int idx = source_token * chunks_per_row + tile_offset + j;
+                output[idx] = chunk;
+            }
         }
     }
 }

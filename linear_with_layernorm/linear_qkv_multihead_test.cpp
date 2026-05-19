@@ -248,30 +248,28 @@ int main() {
 
     cout << "Unpacking Results..." << endl;
     pack_idx = 0;
-    for (int i = 0; i < SEQ_LEN; i++) {
-        for (int j = 0; j < EMBED_DIM; j += PACK_FLOAT) {
-            uint256_dt word_q = packed_Q[pack_idx];
-            uint256_dt word_k = packed_K[pack_idx];
-            uint256_dt word_v = packed_V[pack_idx];
-            pack_idx++;
+    for (int h = 0; h < NUM_HEADS; h++) {
+        for (int i = 0; i < SEQ_LEN; i++) {
+            for (int j = 0; j < HEAD_DIM; j += PACK_FLOAT) {
+                uint256_dt word_q = packed_Q[pack_idx];
+                uint256_dt word_k = packed_K[pack_idx];
+                uint256_dt word_v = packed_V[pack_idx];
+                pack_idx++;
 
-            for (int k = 0; k < PACK_FLOAT; k++) {
-                FloatInt fq, fk, fv;
-                ap_uint<32> q_bits = word_q((k + 1) * 32 - 1, k * 32);
-                ap_uint<32> k_bits = word_k((k + 1) * 32 - 1, k * 32);
-                ap_uint<32> v_bits = word_v((k + 1) * 32 - 1, k * 32);
-                
-                fq.i = q_bits.to_uint();
-                fk.i = k_bits.to_uint();
-                fv.i = v_bits.to_uint();
-                
-                int col_idx = j + k;
-                int head_idx = col_idx / HEAD_DIM;
-                int head_dim = col_idx % HEAD_DIM;
+                for (int k = 0; k < PACK_FLOAT; k++) {
+                    FloatInt fq, fk, fv;
+                    ap_uint<32> q_bits = word_q((k + 1) * 32 - 1, k * 32);
+                    ap_uint<32> k_bits = word_k((k + 1) * 32 - 1, k * 32);
+                    ap_uint<32> v_bits = word_v((k + 1) * 32 - 1, k * 32);
 
-                h_Q_opt[head_idx][i][head_dim] = fq.f;
-                h_K_opt[head_idx][i][head_dim] = fk.f;
-                h_V_opt[head_idx][i][head_dim] = fv.f;
+                    fq.i = q_bits.to_uint();
+                    fk.i = k_bits.to_uint();
+                    fv.i = v_bits.to_uint();
+
+                    h_Q_opt[h][i][j + k] = fq.f;
+                    h_K_opt[h][i][j + k] = fk.f;
+                    h_V_opt[h][i][j + k] = fv.f;
+                }
             }
         }
     }

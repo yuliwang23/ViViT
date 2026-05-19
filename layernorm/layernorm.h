@@ -107,7 +107,7 @@ void load_X_HBM2FIFO(
     hls::stream<uint256_dt> &FIFO_X
 );
 
-void load_X_FIFO2BRAM(
+inline void load_X_FIFO2BRAM(
     hls::stream<uint256_dt> &FIFO_X,
     float BRAM_X[EMBED_DIM]
 );

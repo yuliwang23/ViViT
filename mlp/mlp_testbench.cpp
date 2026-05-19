@@ -6,7 +6,7 @@
 //   1. Generate random FP32 input + weights + biases
 //   2. Compute FP32 reference (golden) using the standard GELU formula
 //   3. Offline-quantize weights per-output-channel to int8, pack to uint256
-//   4. Pack FP32 input to uint256
+//   4. Quantize FP32 input into LayerNorm-style int8+scaler uint256 chunks
 //   5. Call mlp_q() kernel
 //   6. Unpack output and compare against the golden FP32 result
 //
@@ -129,24 +129,38 @@ static void quantize_weight_offline(
     }
 }
 
-//==============================================================
-// Pack FP32 array into uint256_dt chunks (8 floats per chunk)
-//==============================================================
-static void pack_fp32(
-    const std::vector<float> &fp,
-    std::vector<uint256_dt>  &packed)
+static void quantize_input_for_mlp(
+    const std::vector<float> &input_fp,
+    std::vector<uint256_dt>  &input_packed,
+    std::vector<float>       &input_scaler,
+    std::vector<float>       &input_dequant)
 {
-    int N = fp.size();
-    packed.assign(N / 8, 0);
-    for (int i = 0; i < N / 8; i++) {
-        uint256_dt chunk = 0;
-        for (int k = 0; k < 8; k++) {
-            union { float f; uint32_t u; } cv;
-            cv.f = fp[i * 8 + k];
-            int s = k * 32;
-            chunk.range(s + 31, s) = cv.u;
+    input_packed.assign((SEQ_LEN * EMBED_DIM) / 32, 0);
+    input_scaler.assign(SEQ_LEN, 1.0f);
+    input_dequant.assign(SEQ_LEN * EMBED_DIM, 0.0f);
+
+    for (int i = 0; i < SEQ_LEN; i++) {
+        float max_val = 0.0f;
+        for (int d = 0; d < EMBED_DIM; d++) {
+            max_val = std::max(max_val, std::fabs(input_fp[i * EMBED_DIM + d]));
         }
-        packed[i] = chunk;
+        if (max_val < EPSILON) max_val = EPSILON;
+        float scale = 127.0f / max_val;
+        input_scaler[i] = 1.0f / scale;
+
+        for (int j = 0; j < EMBED_DIM / 32; j++) {
+            uint256_dt chunk = 0;
+            for (int k = 0; k < 32; k++) {
+                int d = j * 32 + k;
+                int qi = (int)(input_fp[i * EMBED_DIM + d] * scale);
+                if (qi >  127) qi =  127;
+                if (qi < -128) qi = -128;
+                int s = k * 8;
+                chunk.range(s + 7, s) = (ap_uint<8>)(uint8_t)(int8_t)qi;
+                input_dequant[i * EMBED_DIM + d] = (float)qi * input_scaler[i];
+            }
+            input_packed[i * (EMBED_DIM / 32) + j] = chunk;
+        }
     }
 }
 
@@ -239,15 +253,23 @@ int main()
     for (auto &v : b2)       v = dist_b(rng);
 
     //----------------------------------------------------------
-    // 2. FP32 golden reference
+    // 2. Quantize input the same way LayerNorm feeds mlp_q
+    //----------------------------------------------------------
+    std::vector<uint256_dt> input_packed;
+    std::vector<float> input_scaler;
+    std::vector<float> input_dequant;
+    quantize_input_for_mlp(input_fp, input_packed, input_scaler, input_dequant);
+
+    //----------------------------------------------------------
+    // 3. FP32 golden reference from dequantized LayerNorm output
     //----------------------------------------------------------
     printf("[ref] Computing FP32 reference ...\n");
     std::vector<float> output_ref(SEQ_LEN * EMBED_DIM);
-    mlp_reference(input_fp, W1_fp, W2_fp, b1, b2, output_ref);
+    mlp_reference(input_dequant, W1_fp, W2_fp, b1, b2, output_ref);
     printf("[ref] Done.\n");
 
     //----------------------------------------------------------
-    // 3. Offline quantize weights
+    // 4. Offline quantize weights
     //----------------------------------------------------------
     printf("[q]   Offline-quantizing W1, W2 per output channel ...\n");
     std::vector<uint256_dt> W1_q;
@@ -263,13 +285,6 @@ int main()
         *std::min_element(scale_w2.begin(), scale_w2.end()),
         *std::max_element(scale_w2.begin(), scale_w2.end()));
 
-    //----------------------------------------------------------
-    // 4. Pack FP32 input
-    //----------------------------------------------------------
-    std::vector<uint256_dt> input_packed;
-    pack_fp32(input_fp, input_packed);
-
-    //----------------------------------------------------------
     // 5. Allocate output buffer & call kernel
     //----------------------------------------------------------
     std::vector<uint256_dt> output_packed(SEQ_LEN * EMBED_DIM / 8, 0);
@@ -277,13 +292,16 @@ int main()
     printf("[run] Calling mlp_q kernel ...\n");
     mlp_q(
         input_packed.data(),
+        input_scaler.data(),
         W1_q.data(),
         W2_q.data(),
         b1.data(),
         b2.data(),
         scale_w1.data(),
         scale_w2.data(),
-        output_packed.data()
+        output_packed.data(),
+        0,
+        SEQ_LEN
     );
     printf("[run] Kernel returned.\n");
 

@@ -40,6 +40,7 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cmath>
 #include <sstream>
 #include <cstdlib>
+#include <algorithm>
 
 using namespace std;
 
@@ -55,7 +56,7 @@ using namespace std;
 #define CHUNK_U32 8
 
 // Derived sizes (in number of uint256_dt chunks).
-#define INPUT_NUM_CHUNKS    ((SEQ_LEN  * EMBED_DIM)  / 8)    // FP32 packed: 8 floats/chunk
+#define INPUT_NUM_CHUNKS    ((SEQ_LEN  * EMBED_DIM)  / 32)   // int8 packed: 32 values/chunk
 #define OUTPUT_NUM_CHUNKS   ((SEQ_LEN  * EMBED_DIM)  / 8)
 #define W1_NUM_CHUNKS       ((HIDDEN_DIM * EMBED_DIM) / 32)  // int8 packed: 32 int8/chunk
 #define W2_NUM_CHUNKS       ((EMBED_DIM  * HIDDEN_DIM) / 32)
@@ -385,12 +386,16 @@ int main(int argc, char* argv[])
 	//   o) Create Buffers in Global Memory to store data
 	// ================================================================
 	// Host-side layout of kernel arguments:
-	//   input/output : uint32_t [N_chunks][8]   (each row = one 256-bit chunk
+	//   input        : int8_t   [N_chunks][32]  (each row = one 256-bit chunk
+	//                                            packing 32 int8 values)
+	//   input_scaler : float    [SEQ_LEN]       (dequant scaler per token)
+	//   output       : uint32_t [N_chunks][8]   (each row = one 256-bit chunk
 	//                                            packing 8 FP32 values)
 	//   W1/W2        : int8_t   [N_chunks][32]  (each row = one 256-bit chunk
 	//                                            packing 32 int8 values)
 	//   b1,b2,sw1,sw2: float    [N]
-	uint32_t (*input_buf)[CHUNK_U32];
+	int8_t   (*input_buf)[32];
+	float    *input_scaler_buf;
 	uint32_t (*output_buf)[CHUNK_U32];
 	int8_t   (*W1_buf)[32];
 	int8_t   (*W2_buf)[32];
@@ -411,15 +416,23 @@ int main(int argc, char* argv[])
 	// ------------------------------------------------------------------
 	void *ptr = nullptr;
 
-	// Allocate input: [SEQ_LEN * EMBED_DIM] floats, packed into 256-bit chunks
+	// Allocate input: [SEQ_LEN * EMBED_DIM] int8, packed into 256-bit chunks
 	cout << "HOST-Info: Allocating and initializing data for input ... ";
 	if (posix_memalign(&ptr, 4096, INPUT_NUM_CHUNKS * 32)) {
 		cout << endl << "HOST-Error: Out of Memory during memory allocation for input array" << endl << endl;
 		return EXIT_FAILURE;
 	}
-	input_buf = reinterpret_cast<uint32_t(*)[CHUNK_U32]>(ptr);
+	input_buf = reinterpret_cast<int8_t(*)[32]>(ptr);
 	memset(input_buf, 0, INPUT_NUM_CHUNKS * 32);
-	// Load FP32 input values from input.txt and pack 8-per-chunk
+
+	if (posix_memalign(&ptr, 4096, SEQ_LEN * sizeof(float))) {
+		cout << endl << "HOST-Error: Out of Memory during memory allocation for input scaler array" << endl << endl;
+		return EXIT_FAILURE;
+	}
+	input_scaler_buf = reinterpret_cast<float*>(ptr);
+
+	// Load FP32 input values from input.txt, then quantize to the same int8+scaler
+	// format produced by the LayerNorm kernel.
 	{
 		ifstream fin("input.txt");
 		if (!fin.is_open()) {
@@ -428,20 +441,32 @@ int main(int argc, char* argv[])
 			cout << "Current working directory: " << cwd << endl;
 			return EXIT_FAILURE;
 		}
-		for (int c = 0; c < INPUT_NUM_CHUNKS; c++) {
-			for (int k = 0; k < 8; k++) {
-				float f;
-				if (!(fin >> f)) {
+		float row[EMBED_DIM];
+		for (int i = 0; i < SEQ_LEN; i++) {
+			float max_abs = 0.0f;
+			for (int j = 0; j < EMBED_DIM; j++) {
+				if (!(fin >> row[j])) {
 					cerr << "Error: input.txt has too few values" << endl;
 					return EXIT_FAILURE;
 				}
-				union { float f; uint32_t u; } cv; cv.f = f;
-				input_buf[c][k] = cv.u;
+				max_abs = std::max(max_abs, fabsf(row[j]));
+			}
+
+			if (max_abs < EPSILON) max_abs = EPSILON;
+			float quant_scale = 127.0f / max_abs;
+			input_scaler_buf[i] = max_abs / 127.0f;
+
+			for (int j = 0; j < EMBED_DIM; j++) {
+				float f = row[j] * quant_scale;
+				int qi = (int)f;
+				if (qi > 127) qi = 127;
+				if (qi < -128) qi = -128;
+				input_buf[(i * EMBED_DIM + j) / 32][j % 32] = (int8_t)qi;
 			}
 		}
 		fin.close();
 	}
-	cout << "Done (" << SEQ_LEN << "x" << EMBED_DIM << " floats from input.txt)" << endl;
+	cout << "Done (" << SEQ_LEN << "x" << EMBED_DIM << " int8 from input.txt)" << endl;
 
 	// Allocate W1: [HIDDEN_DIM * EMBED_DIM] int8, packed 32-per-chunk
 	cout << "HOST-Info: Allocating and initializing data for W1 ... ";
@@ -596,12 +621,11 @@ int main(int argc, char* argv[])
 	cout << "HOST-Info: (Step 4.3) Sanity Check: First values of each input buffer   " << endl;
 	cout << "HOST-Info: ============================================================= " << endl;
 
-	// input: unpack uint32 bits back to float and print first 8 values
-	cout << "HOST-Info: input[0..7] (FP32) = ";
-	for (int k = 0; k < 8; k++) {
-		union { uint32_t u; float f; } cv; cv.u = input_buf[0][k];
-		cout << cv.f << " ";
-	}
+	// input: print the first packed int8 chunk and token scaler.
+	cout << "HOST-Info: input_q[0..31] (int8) = ";
+	for (int k = 0; k < 32; k++) cout << (int)input_buf[0][k] << " ";
+	cout << endl;
+	cout << "HOST-Info: input_scaler[0] = " << input_scaler_buf[0];
 	cout << endl;
 
 	// W1: first 32 int8 values (one chunk)
@@ -638,7 +662,8 @@ int main(int argc, char* argv[])
 	     << "  W1: " << W1_NUM_CHUNKS
 	     << "  W2: " << W2_NUM_CHUNKS << endl;
 	cout << endl;
-	//             o) GlobMem_BUF_input     - stores input (R)
+	//             o) GlobMem_BUF_input     - stores quantized input (R)
+	//             o) GlobMem_BUF_input_scaler - stores input dequant scaler (R)
 	//             o) GlobMem_BUF_W1        - stores W1 (R)
 	//             o) GlobMem_BUF_W2        - stores W2 (R)
 	//             o) GlobMem_BUF_b1        - stores b1 (R)
@@ -652,7 +677,7 @@ int main(int argc, char* argv[])
 	#endif
 	// ------------------------------------------------------------------
 	// HBM bank assignment (must match connectivity.cfg):
-	//   HBM[0]: input, output, b1, b2, scale_w1, scale_w2  (bundle gmem0)
+	//   HBM[0]: input, input_scaler, output, b1, b2, scale_w1, scale_w2  (bundle gmem0)
 	//   HBM[2]: W1                                          (bundle gmem1)
 	//   HBM[4]: W2                                          (bundle gmem2)
 	//
@@ -666,7 +691,7 @@ int main(int argc, char* argv[])
 	// XRT/Vitis places buffers on HBM[0] as directed by connectivity.cfg.
 	// Data transfer uses clEnqueueWriteBuffer / clEnqueueReadBuffer.
 	// ------------------------------------------------------------------
-	cl_mem	GlobMem_BUF_input, GlobMem_BUF_W1, GlobMem_BUF_W2,
+	cl_mem	GlobMem_BUF_input, GlobMem_BUF_input_scaler, GlobMem_BUF_W1, GlobMem_BUF_W2,
 			GlobMem_BUF_b1, GlobMem_BUF_b2,
 			GlobMem_BUF_sw1, GlobMem_BUF_sw2,
 			GlobMem_BUF_output;
@@ -677,6 +702,15 @@ int main(int argc, char* argv[])
 		CL_MEM_READ_WRITE, INPUT_NUM_CHUNKS * 32, nullptr, &errCode);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_input" << endl << endl;
+		return EXIT_FAILURE;
+	}
+
+	// Allocate Global Memory for GlobMem_BUF_input_scaler
+	// .......................................................
+	GlobMem_BUF_input_scaler = clCreateBuffer(Context,
+		CL_MEM_READ_WRITE, SEQ_LEN * sizeof(float), nullptr, &errCode);
+	if (errCode != CL_SUCCESS) {
+		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_input_scaler" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
@@ -750,22 +784,25 @@ int main(int argc, char* argv[])
 	// 				 Kernel	  		        Argument Nb		Description
 	// 				----------------------------------------------------
 	//  			 mlp_q	                0			GlobMem_BUF_input
-	//				 mlp_q	                1			GlobMem_BUF_W1
-	//				 mlp_q	                2			GlobMem_BUF_W2
-	//				 mlp_q	                3			GlobMem_BUF_b1
-	//				 mlp_q	                4			GlobMem_BUF_b2
-	//				 mlp_q	                5			GlobMem_BUF_sw1
-	//				 mlp_q	                6			GlobMem_BUF_sw2
-	//				 mlp_q	                7			GlobMem_BUF_output
+	//  			 mlp_q	                1			GlobMem_BUF_input_scaler
+	//				 mlp_q	                2			GlobMem_BUF_W1
+	//				 mlp_q	                3			GlobMem_BUF_W2
+	//				 mlp_q	                4			GlobMem_BUF_b1
+	//				 mlp_q	                5			GlobMem_BUF_b2
+	//				 mlp_q	                6			GlobMem_BUF_sw1
+	//				 mlp_q	                7			GlobMem_BUF_sw2
+	//				 mlp_q	                8			GlobMem_BUF_output
+	//				 mlp_q	                9			token_offset
+	//				 mlp_q	               10			valid_seq_len
 	// 				----------------------------------------------------
 	//         o) Copy Input Data from Host to Global Memory
 	//         o) Submit Kernels for Execution
 	//         o) Copy Results from Global Memory to Host
 	// ============================================================================
-	int Nb_Of_Mem_Events = 7;   // 7 write transfers (input,W1,W2,b1,b2,sw1,sw2)
+	int Nb_Of_Mem_Events = 8;   // 8 write transfers (input,input_scaler,W1,W2,b1,b2,sw1,sw2)
 	int Nb_Of_Exe_Events = 1;
 
-	cl_event Mem_op_event[7];
+	cl_event Mem_op_event[8];
 	cl_event K_exe_event[Nb_Of_Exe_Events];
 
 
@@ -785,14 +822,20 @@ int main(int argc, char* argv[])
 	#endif
 	errCode  = false;
 
+	int token_offset = 0;
+	int valid_seq_len = SEQ_LEN;
+
 	errCode |= clSetKernelArg(K_mlp_q, 0, sizeof(cl_mem), &GlobMem_BUF_input);
-	errCode |= clSetKernelArg(K_mlp_q, 1, sizeof(cl_mem), &GlobMem_BUF_W1);
-	errCode |= clSetKernelArg(K_mlp_q, 2, sizeof(cl_mem), &GlobMem_BUF_W2);
-	errCode |= clSetKernelArg(K_mlp_q, 3, sizeof(cl_mem), &GlobMem_BUF_b1);
-	errCode |= clSetKernelArg(K_mlp_q, 4, sizeof(cl_mem), &GlobMem_BUF_b2);
-	errCode |= clSetKernelArg(K_mlp_q, 5, sizeof(cl_mem), &GlobMem_BUF_sw1);
-	errCode |= clSetKernelArg(K_mlp_q, 6, sizeof(cl_mem), &GlobMem_BUF_sw2);
-	errCode |= clSetKernelArg(K_mlp_q, 7, sizeof(cl_mem), &GlobMem_BUF_output);
+	errCode |= clSetKernelArg(K_mlp_q, 1, sizeof(cl_mem), &GlobMem_BUF_input_scaler);
+	errCode |= clSetKernelArg(K_mlp_q, 2, sizeof(cl_mem), &GlobMem_BUF_W1);
+	errCode |= clSetKernelArg(K_mlp_q, 3, sizeof(cl_mem), &GlobMem_BUF_W2);
+	errCode |= clSetKernelArg(K_mlp_q, 4, sizeof(cl_mem), &GlobMem_BUF_b1);
+	errCode |= clSetKernelArg(K_mlp_q, 5, sizeof(cl_mem), &GlobMem_BUF_b2);
+	errCode |= clSetKernelArg(K_mlp_q, 6, sizeof(cl_mem), &GlobMem_BUF_sw1);
+	errCode |= clSetKernelArg(K_mlp_q, 7, sizeof(cl_mem), &GlobMem_BUF_sw2);
+	errCode |= clSetKernelArg(K_mlp_q, 8, sizeof(cl_mem), &GlobMem_BUF_output);
+	errCode |= clSetKernelArg(K_mlp_q, 9, sizeof(int), &token_offset);
+	errCode |= clSetKernelArg(K_mlp_q, 10, sizeof(int), &valid_seq_len);
 
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-ERROR: Failed to set Kernel arguments" << endl << endl;
@@ -815,50 +858,57 @@ int main(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 
+	errCode = clEnqueueWriteBuffer(Command_Queue, GlobMem_BUF_input_scaler, CL_FALSE, 0,
+		SEQ_LEN * sizeof(float), input_scaler_buf, 0, NULL, &Mem_op_event[1]);
+	if (errCode != CL_SUCCESS) {
+		cout << endl << "Host-Error: Failed to write input scaler to GlobMem_BUF_input_scaler" << endl << endl;
+		return EXIT_FAILURE;
+	}
+
 	errCode = clEnqueueWriteBuffer(Command_Queue, GlobMem_BUF_W1, CL_FALSE, 0,
-		W1_NUM_CHUNKS * 32, W1_buf, 0, NULL, &Mem_op_event[1]);
+		W1_NUM_CHUNKS * 32, W1_buf, 0, NULL, &Mem_op_event[2]);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to write W1 to GlobMem_BUF_W1" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
 	errCode = clEnqueueWriteBuffer(Command_Queue, GlobMem_BUF_W2, CL_FALSE, 0,
-		W2_NUM_CHUNKS * 32, W2_buf, 0, NULL, &Mem_op_event[2]);
+		W2_NUM_CHUNKS * 32, W2_buf, 0, NULL, &Mem_op_event[3]);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to write W2 to GlobMem_BUF_W2" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
 	errCode = clEnqueueWriteBuffer(Command_Queue, GlobMem_BUF_b1, CL_FALSE, 0,
-		HIDDEN_DIM * sizeof(float), b1_buf, 0, NULL, &Mem_op_event[3]);
+		HIDDEN_DIM * sizeof(float), b1_buf, 0, NULL, &Mem_op_event[4]);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to write b1 to GlobMem_BUF_b1" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
 	errCode = clEnqueueWriteBuffer(Command_Queue, GlobMem_BUF_b2, CL_FALSE, 0,
-		EMBED_DIM * sizeof(float), b2_buf, 0, NULL, &Mem_op_event[4]);
+		EMBED_DIM * sizeof(float), b2_buf, 0, NULL, &Mem_op_event[5]);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to write b2 to GlobMem_BUF_b2" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
 	errCode = clEnqueueWriteBuffer(Command_Queue, GlobMem_BUF_sw1, CL_FALSE, 0,
-		HIDDEN_DIM * sizeof(float), scale_w1_buf, 0, NULL, &Mem_op_event[5]);
+		HIDDEN_DIM * sizeof(float), scale_w1_buf, 0, NULL, &Mem_op_event[6]);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to write scale_w1 to GlobMem_BUF_sw1" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
 	errCode = clEnqueueWriteBuffer(Command_Queue, GlobMem_BUF_sw2, CL_FALSE, 0,
-		EMBED_DIM * sizeof(float), scale_w2_buf, 0, NULL, &Mem_op_event[6]);
+		EMBED_DIM * sizeof(float), scale_w2_buf, 0, NULL, &Mem_op_event[7]);
 	if (errCode != CL_SUCCESS) {
 		cout << endl << "Host-Error: Failed to write scale_w2 to GlobMem_BUF_sw2" << endl << endl;
 		return EXIT_FAILURE;
 	}
 
 	// output buffer: kernel will write to it, no host-to-device transfer needed.
-	// We reduce Nb_Of_Mem_Events to 7 (only the 7 write transfers above).
+	// We reduce Nb_Of_Mem_Events to 8 (only the 8 write transfers above).
 
 	// --------------------------------------------------------
 	errCode = clEnqueueBarrierWithWaitList(Command_Queue, 0, NULL, NULL);
@@ -955,7 +1005,8 @@ int main(int argc, char* argv[])
 	// ------------------------------------------------------
 	// Step 6.2: Check correctness of the output results
 	// ------------------------------------------------------
-	// Compare kernel output against the FP32 golden in golden_output.txt
+	// Optional comparison against the legacy FP32 golden in golden_output.txt.
+	// This now includes the expected error from LayerNorm-style input quantization.
 	{
 		ifstream fg("golden_output.txt");
 		if (!fg.is_open()) {
@@ -1020,6 +1071,7 @@ int main(int argc, char* argv[])
 	for (int i = 0; i < 1; i++) clReleaseEvent(Mem_read_event[i]);
 
 	clReleaseMemObject(GlobMem_BUF_input);
+	clReleaseMemObject(GlobMem_BUF_input_scaler);
 	clReleaseMemObject(GlobMem_BUF_W1);
 	clReleaseMemObject(GlobMem_BUF_W2);
 	clReleaseMemObject(GlobMem_BUF_b1);
@@ -1037,6 +1089,7 @@ int main(int argc, char* argv[])
 	delete[] Platform_IDs;
 	delete[] Device_IDs;
 	free(input_buf);
+	free(input_scaler_buf);
 	free(W1_buf);
 	free(W2_buf);
 	free(b1_buf);

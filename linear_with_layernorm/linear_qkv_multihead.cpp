@@ -574,15 +574,14 @@ void store_QKV_FIFO2HBM(
     int iter
 ) {
     int chunks_per_tile = TILE_SIZE / 8;
-    int tile_offset = iter * chunks_per_tile;
-    int chunks_per_row = EMBED_DIM / 8; 
+    int tile_offset = iter * SEQ_LEN * chunks_per_tile;
 
     store_seq_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
         store_tile_loop:
         for (int j = 0; j < chunks_per_tile; j++) {
             #pragma HLS PIPELINE II=1
-            int target_idx = i * chunks_per_row + tile_offset + j;
+            int target_idx = tile_offset + i * chunks_per_tile + j;
             
             Q[target_idx] = FIFO_Q_out.read();
             K[target_idx] = FIFO_K_out.read();
