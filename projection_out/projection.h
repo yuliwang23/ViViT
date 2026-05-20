@@ -4,26 +4,26 @@
 #include <cmath>
 #include <stdint.h>
 
-//constexpr int SEQ_LEN = 14 * 14 + 1; // 197
-//constexpr int EMBED_DIM = 768;
-//constexpr int NUM_HEADS = 12;
-//constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS; // 64
-//constexpr int OUT_TILE = 64;
-//constexpr int DOT_UNROLL = 16;
-//constexpr int PACK_FACTOR = 8;
-//constexpr int EMBED_DIM_PACKED = EMBED_DIM / PACK_FACTOR;
-//constexpr int PACKS_PER_DOT = DOT_UNROLL / PACK_FACTOR;
+constexpr int SEQ_LEN = 14 * 14 + 1; // 197
+constexpr int EMBED_DIM = 768;
+constexpr int NUM_HEADS = 12;
+constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS; // 64
+constexpr int OUT_TILE = 64;
+constexpr int DOT_UNROLL = 16;
+constexpr int PACK_FACTOR = 8;
+constexpr int EMBED_DIM_PACKED = EMBED_DIM / PACK_FACTOR;
+constexpr int PACKS_PER_DOT = DOT_UNROLL / PACK_FACTOR;
 
 // Small C/RTL co-simulation setting:
- constexpr int SEQ_LEN = 4;
- constexpr int EMBED_DIM = 64;
- constexpr int NUM_HEADS = 2;
- constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS; // 32
- constexpr int OUT_TILE = 16;
- constexpr int DOT_UNROLL = 8;
- constexpr int PACK_FACTOR = 8;
- constexpr int EMBED_DIM_PACKED = EMBED_DIM / PACK_FACTOR; // 8
- constexpr int PACKS_PER_DOT = DOT_UNROLL / PACK_FACTOR;   // 1
+//  constexpr int SEQ_LEN = 4;
+//  constexpr int EMBED_DIM = 64;
+//  constexpr int NUM_HEADS = 2;
+//  constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS; // 32
+//  constexpr int OUT_TILE = 16;
+//  constexpr int DOT_UNROLL = 8;
+//  constexpr int PACK_FACTOR = 8;
+//  constexpr int EMBED_DIM_PACKED = EMBED_DIM / PACK_FACTOR; // 8
+//  constexpr int PACKS_PER_DOT = DOT_UNROLL / PACK_FACTOR;   // 1
 
 extern "C"
 {
