@@ -26,7 +26,7 @@
 #include <string>
 
 // Must match the kernel dimensions
-#define SEQ_LEN     64
+#define SEQ_LEN     197
 #define EMBED_DIM   768
 
 static bool read_floats(const std::string &path,

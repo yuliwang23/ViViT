@@ -32,7 +32,7 @@
 #include <algorithm>
 
 // Match the kernel's dimensions exactly
-#define SEQ_LEN     64
+#define SEQ_LEN     197
 #define EMBED_DIM   768
 #define HIDDEN_DIM  3072
 
@@ -174,7 +174,9 @@ int main(int argc, char **argv)
     //----------------------------------------------------------
     // 2. FP32 reference (golden output)
     //----------------------------------------------------------
-    printf("[2] Computing FP32 reference (may take ~10s) ...\n");
+    // SEQ_LEN=197 makes this ~3x slower than at SEQ_LEN=64.
+    // Expect ~30s on a modern desktop CPU.
+    printf("[2] Computing FP32 reference (may take ~30s at SEQ_LEN=197) ...\n");
     std::vector<float> output_ref(SEQ_LEN * EMBED_DIM);
     mlp_reference(input_fp, W1_fp, W2_fp, b1, b2, output_ref);
 
