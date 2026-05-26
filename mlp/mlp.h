@@ -13,7 +13,14 @@ typedef ap_int<8> int8_dt;
 typedef ap_int<26> int26_dt; // matmul accumulator (int8*int8 sum)
 typedef ap_int<32> int32_dt;
 
+// Compact storage type for the hidden-layer GELU activation buffer.
+// 16-bit fixed-point, 8 integer bits (range [-128, 127.996], step 1/256).
+typedef ap_fixed<16, 8> half_dt;
+
 #define SEQ_LEN 197
+#define TOKEN_TILE 4
+#define SEQ_LEN_PADDED 200   // = ((197 + 3) / 4) * 4
+
 #define EMBED_DIM 768   // = IN_DIM = OUT_DIM
 #define HIDDEN_DIM 3072 // 4 * EMBED_DIM (standard GPT MLP)
 
@@ -32,14 +39,6 @@ typedef ap_int<32> int32_dt;
 #define EMBED_DIM_INV (1.0f / (float)EMBED_DIM)
 #define HIDDEN_DIM_INV (1.0f / (float)HIDDEN_DIM)
 
-//==============================================================
-// Welford partial tables (same trick the reference code uses)
-// Pre-computed weights so the running stats can be updated in
-// fully-pipelined loops without sqrt / div on the critical path.
-//==============================================================
-extern const float MEAN_WT_HID[HIDDEN_DIM / 16];
-extern const float M2_WT_HID[HIDDEN_DIM / 16];
-
 extern "C"
 {
     void mlp_q(
@@ -56,7 +55,7 @@ extern "C"
         int valid_seq_len);
 }
 
-inline void load_X_HBM2FIFO(
+void load_X_HBM2FIFO(
     uint256_dt *HBM_X,
     hls::stream<uint256_dt> &FIFO_X);
 
@@ -78,25 +77,19 @@ void quantize_row_dynamic(
     int length,
     float *out_scaler);
 
-// Build hidden activation tile (one TILE_SIZE chunk of output features
-// for all SEQ_LEN tokens) using Dense_0, then bias + GELU.  Writes
-// directly into H_full_fp[i][tile_idx*TILE_SIZE + t] and updates
-// scaler_H[i] with running max-abs across tiles.
 void dense0_one_tile(
-    int64_dt X_package[SEQ_LEN][EMBED_DIM_package],
-    float scaler_X[SEQ_LEN],
+    int64_dt X_package[SEQ_LEN_PADDED][EMBED_DIM_package],
+    float scaler_X[SEQ_LEN_PADDED],
     hls::stream<uint256_dt> &FIFO_W1,
     float SRAM_b1[HIDDEN_DIM],
     float SRAM_sw1[HIDDEN_DIM],
-    float H_full_fp[SEQ_LEN][HIDDEN_DIM],
-    float scaler_H[SEQ_LEN],
+    half_dt H_full_fp[SEQ_LEN_PADDED][HIDDEN_DIM],
+    float scaler_H[SEQ_LEN_PADDED],
     int tile_idx);
 
-// Dense_1: matmul on the *already-quantized* hidden activation, plus
-// dequant + bias.  Writes a TILE_SIZE-wide output column tile to HBM.
 void dense1_one_tile(
-    int64_dt H_package[SEQ_LEN][HIDDEN_DIM_package],
-    float scaler_H[SEQ_LEN],
+    int64_dt H_package[SEQ_LEN_PADDED][HIDDEN_DIM_package],
+    float scaler_H[SEQ_LEN_PADDED],
     hls::stream<uint256_dt> &FIFO_W2,
     float SRAM_b2[EMBED_DIM],
     float SRAM_sw2[EMBED_DIM],
@@ -112,6 +105,5 @@ void store_Output_FIFO2HBM(
 
 // LUT lookup with linear interpolation
 float gelu_lut_lookup(float x);
-// NOTE: GELU_LUT[513] is now defined in "gelu_lut.h" (auto-generated ROM).
 
 #endif
