@@ -13,7 +13,7 @@ typedef ap_int<8> int8_dt;
 typedef ap_int<26> int26_dt; // matmul accumulator (int8*int8 sum)
 typedef ap_int<32> int32_dt;
 
-#define SEQ_LEN 64
+#define SEQ_LEN 197
 #define EMBED_DIM 768   // = IN_DIM = OUT_DIM
 #define HIDDEN_DIM 3072 // 4 * EMBED_DIM (standard GPT MLP)
 

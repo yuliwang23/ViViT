@@ -1,0 +1,1596 @@
+/**********
+Copyright (c) 2018, Xilinx, Inc.
+All rights reserved.
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+1. Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its contributors
+may be used to endorse or promote products derived from this software
+without specific prior written permission.
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+**********/
+
+/*******************************************************************************
+** HOST Code
+*******************************************************************************/
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <cstring>
+#include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <chrono>
+
+// openmp
+#include <omp.h>
+
+using namespace std;
+
+#include <CL/cl.h>
+#include "help_functions.h"
+#include "layer.h"
+#include "utility.h"
+// #include "host.h"
+
+#define OCL_CHECK(error, call, msg)  																		\
+	call;                                                                                           		\
+    if (error != CL_SUCCESS) {                                                                              \
+        fprintf(stderr, "%s\n", msg);                                                                       \
+        fprintf(stderr, "%s:%d Error calling " #call ", error code is: %d\n", __FILE__, __LINE__, error); 	\
+        fprintf(stderr, "See the error code reference:\n");													\
+		fprintf(stderr, "https://www.docdroid.net/Ee5RTkS/opencl-error-codes-1x-and-2x-pdf#page=6\n");		\
+		fprintf(stderr, "https://registry.khronos.org/OpenCL/sdk/1.0/docs/man/xhtml/errors.html\n");		\
+        exit(EXIT_FAILURE);                                                                               	\
+    }
+
+#define ALL_MESSAGES
+
+constexpr int MLP_KERNEL_SEQ_LEN = 64;
+constexpr int MLP_CHUNK_U32 = 8;
+constexpr int MLP_OUTPUT_CHUNKS = (SEQ_LEN * EMBED_DIM) / MLP_CHUNK_U32;
+constexpr int MLP_W1_CHUNKS = (MLP_DIM * EMBED_DIM) / 32;
+constexpr int MLP_W2_CHUNKS = (EMBED_DIM * MLP_DIM) / 32;
+
+// -----------------------------host side helper functions--------------------------------------
+
+static void pack_mlp_weights(
+    const int8_t W1[EMBED_DIM][MLP_DIM],
+    const int8_t W2[MLP_DIM][EMBED_DIM],
+    int8_t W1_packed[MLP_W1_CHUNKS][32],
+    int8_t W2_packed[MLP_W2_CHUNKS][32])
+{
+    memset(W1_packed, 0, MLP_W1_CHUNKS * 32 * sizeof(int8_t));
+    memset(W2_packed, 0, MLP_W2_CHUNKS * 32 * sizeof(int8_t));
+
+    for (int h = 0; h < MLP_DIM; h++)
+    {
+        for (int d = 0; d < EMBED_DIM; d++)
+        {
+            const int flat = h * EMBED_DIM + d;
+            W1_packed[flat / 32][flat % 32] = W1[d][h];
+        }
+    }
+
+    for (int d = 0; d < EMBED_DIM; d++)
+    {
+        for (int h = 0; h < MLP_DIM; h++)
+        {
+            const int flat = d * MLP_DIM + h;
+            W2_packed[flat / 32][flat % 32] = W2[h][d];
+        }
+    }
+}
+
+static void pack_linear_layernorm_weight(
+    const int8_t weight[EMBED_DIM][EMBED_DIM],
+    int8_t packed[EMBED_DIM][EMBED_DIM])
+{
+    for (int out = 0; out < EMBED_DIM; out++)
+    {
+        for (int in = 0; in < EMBED_DIM; in++)
+        {
+            packed[out][in] = weight[in][out];
+        }
+    }
+}
+//-------------------------------------------------------------------------------------
+
+// ----------------------------------Same as previous version of host.cpp----------------------------------
+// ********************************************************************************** //
+// ---------------------------------------------------------------------------------- //
+//                          M A I N    F U N C T I O N                                //
+// ---------------------------------------------------------------------------------- //
+// ********************************************************************************** //
+
+int main(int argc, char *argv[])
+{
+    cout << endl;
+
+// ============================================================================
+// Step 1: Check Command Line Arguments
+// ============================================================================
+//    o) argv[1] Platfrom Vendor
+//    o) argv[2] Device Name
+//    o) argv[3] XCLBIN file
+// ============================================================================
+// INFO: sample usage: ./host Xilinx xilinx_u280_xdma_201920_3 spatial_encoder.xclbin
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 1) Check Command Line Arguments                      " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+#endif
+
+    if (argc != 4)
+    {
+        cout << "HOST-Error: Incorrect command line syntax " << endl;
+        cout << "HOST-Info:  Usage: " << argv[0] << " <Platform_Vendor> <Device_Name> <XCLBIN_File>  <Test Vectors Size>" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    const char *Target_Platform_Vendor = argv[1];
+    const char *Target_Device_Name = argv[2];
+    const char *xclbinFilename = argv[3];
+    cout << "HOST-Info: Platform_Vendor   : " << Target_Platform_Vendor << endl;
+    cout << "HOST-Info: Device_Name       : " << Target_Device_Name << endl;
+    cout << "HOST-Info: XCLBIN_file       : " << xclbinFilename << endl;
+
+    // ============================================================================
+    // Step 2: Detect Target Platform and Target Device in a system.
+    //         Create Context and Command Queue.
+    // ============================================================================
+    // Variables:
+    //   o) Target_Platform_Vendor[] - defined as main() input argument
+    //   o) Target_Device_Name[]     - defined as main() input argument
+    //
+    // After that
+    //   o) Create a Context
+    //   o) Create a Command Queue
+    // ============================================================================
+    cout << endl;
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 2) Detect Target Platform and Target Device in a system " << endl;
+    cout << "HOST-Info:          Create Context and Command Queue                     " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+#endif
+
+    cl_uint ui;
+
+    cl_platform_id *Platform_IDs;
+    cl_uint Nb_Of_Platforms;
+    cl_platform_id Target_Platform_ID;
+    bool Platform_Detected;
+    char *platform_info;
+
+    cl_device_id *Device_IDs;
+    cl_uint Nb_Of_Devices;
+    cl_device_id Target_Device_ID;
+    bool Device_Detected;
+    char *device_info;
+
+    cl_context Context;
+    cl_command_queue Command_Queue;
+
+    cl_int errCode;
+    size_t size;
+
+    // ------------------------------------------------------------------------------------
+    // Step 2.1: Get All PLATFORMS, then search for Target_Platform_Vendor (CL_PLATFORM_VENDOR)
+    // ------------------------------------------------------------------------------------
+
+    // Get the number of platforms
+    // ..................................................
+    errCode = clGetPlatformIDs(0, NULL, &Nb_Of_Platforms);
+    if (errCode != CL_SUCCESS || Nb_Of_Platforms <= 0)
+    {
+        cout << endl
+             << "HOST-Error: Failed to get the number of available platforms" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Number of detected platforms : " << Nb_Of_Platforms << endl;
+#endif
+
+    // Allocate memory to store platforms
+    // ..................................................
+    Platform_IDs = new cl_platform_id[Nb_Of_Platforms];
+    if (!Platform_IDs)
+    {
+        cout << endl
+             << "HOST-Error: Out of Memory during memory allocation for Platform_IDs" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    // Get and store all PLATFORMS
+    // ..................................................
+    errCode = clGetPlatformIDs(Nb_Of_Platforms, Platform_IDs, NULL);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to get the available platforms" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    // Search for Platform (ex: Xilinx) using: CL_PLATFORM_VENDOR = Target_Platform_Vendor
+    // ....................................................................................
+    Platform_Detected = false;
+    for (ui = 0; ui < Nb_Of_Platforms; ui++)
+    {
+
+        errCode = clGetPlatformInfo(Platform_IDs[ui], CL_PLATFORM_VENDOR, 0, NULL, &size);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to get the size of the Platofrm parameter " << "CL_PLATFORM_VENDOR" << " value " << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        platform_info = new char[size];
+        if (!platform_info)
+        {
+            cout << endl
+                 << "HOST-Error: Out of Memory during memory allocation for Platform Parameter " << "CL_PLATFORM_VENDOR" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        errCode = clGetPlatformInfo(Platform_IDs[ui], CL_PLATFORM_VENDOR, size, platform_info, NULL);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to get the " << "CL_PLATFORM_VENDOR" << " platform info" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        // Check if the current platform matches Target_Platform_Vendor
+        // .............................................................
+        if (strcmp(platform_info, Target_Platform_Vendor) == 0)
+        {
+            Platform_Detected = true;
+            Target_Platform_ID = Platform_IDs[ui];
+#ifdef ALL_MESSAGES
+            cout << "HOST-Info: Selected platform            : " << Target_Platform_Vendor << endl
+                 << endl;
+#endif
+        }
+    }
+
+    if (Platform_Detected == false)
+    {
+        cout << endl
+             << "HOST-Error: Failed to get detect " << Target_Platform_Vendor << " platform" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Step 2.2:  Get All Devices for selected platform Target_Platform_ID
+    //            then search for Xilinx platform (CL_DEVICE_NAME = Target_Device_Name)
+    // ------------------------------------------------------------------------------------
+
+    // Get the Number of Devices
+    // ............................................................................
+    errCode = clGetDeviceIDs(Target_Platform_ID, CL_DEVICE_TYPE_ALL, 0, NULL, &Nb_Of_Devices);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to get the number of available Devices" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Number of available devices  : " << Nb_Of_Devices << endl;
+#endif
+
+    Device_IDs = new cl_device_id[Nb_Of_Devices];
+    if (!Device_IDs)
+    {
+        cout << endl
+             << "HOST-Error: Out of Memory during memory allocation for Device_IDs" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    errCode = clGetDeviceIDs(Target_Platform_ID, CL_DEVICE_TYPE_ALL, Nb_Of_Devices, Device_IDs, NULL);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to get available Devices" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    // Search for CL_DEVICE_NAME = Target_Device_Name
+    // ............................................................................
+    Device_Detected = false;
+    for (ui = 0; ui < Nb_Of_Devices; ui++)
+    {
+        errCode = clGetDeviceInfo(Device_IDs[ui], CL_DEVICE_NAME, 0, NULL, &size);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to get the size of the Device parameter value " << "CL_DEVICE_NAME" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        device_info = new char[size];
+        if (!device_info)
+        {
+            cout << endl
+                 << "HOST-Error: Out of Memory during memory allocation for Device parameter " << "CL_DEVICE_NAME" << " value " << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        errCode = clGetDeviceInfo(Device_IDs[ui], CL_DEVICE_NAME, size, device_info, NULL);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to get the " << "CL_DEVICE_NAME" << " device info" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        // Check if the current device matches Target_Device_Name
+        // ............................................................................
+        if (strcmp(device_info, Target_Device_Name) == 0)
+        {
+            Device_Detected = true;
+            Target_Device_ID = Device_IDs[ui];
+        }
+    }
+
+    if (Device_Detected == false)
+    {
+        cout << endl
+             << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    else
+    {
+#ifdef ALL_MESSAGES
+        cout << "HOST-Info: Selected device              : " << Target_Device_Name << endl
+             << endl;
+#endif
+    }
+
+// ------------------------------------------------------------------------------------
+// Step 2.3: Create Context
+// ------------------------------------------------------------------------------------
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating Context ... " << endl;
+#endif
+    Context = clCreateContext(0, 1, &Target_Device_ID, NULL, NULL, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to create a Context" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+// ------------------------------------------------------------------------------------
+// Step 2.4: Create Command Queue (commands are executed in-order)
+// ------------------------------------------------------------------------------------
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating Command Queue ... " << endl;
+#endif
+    Command_Queue = clCreateCommandQueue(Context, Target_Device_ID, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to create a Command Queue" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+// ============================================================================
+// Step 3: Create Program and Kernel
+// ============================================================================
+//   o) Create a Program from a Binary File and Build it
+//   o) Create a Kernel
+// ============================================================================
+#ifdef ALL_MESSAGES
+    cout << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 3) Create Program and Kernels                           " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+#endif
+
+    // ------------------------------------------------------------------
+    // Step 3.1: Load Binary File from a disk to Memory
+    // ------------------------------------------------------------------
+    unsigned char *xclbin_Memory;
+    int program_length;
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Loading " << xclbinFilename << " binary file to memory ..." << endl;
+#endif
+
+    program_length = loadFile2Memory(xclbinFilename, (char **)&xclbin_Memory);
+    if (program_length < 0)
+    {
+        cout << endl
+             << "HOST-Error: Failed to load " << xclbinFilename << " binary file to memory" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    // ------------------------------------------------------------
+    // Step 3.2: Create a program using a Binary File
+    // ------------------------------------------------------------
+    size_t Program_Length_in_Bytes;
+    cl_program Program;
+    cl_int Binary_Status;
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating Program with Binary ..." << endl;
+#endif
+    Program_Length_in_Bytes = program_length;
+    Program = clCreateProgramWithBinary(Context, 1, &Target_Device_ID, &Program_Length_in_Bytes,
+                                        (const unsigned char **)&xclbin_Memory, &Binary_Status, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to create a Program from a Binary" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+// ----------------------------------------------------------------------
+// Step 3.3: Build (compiles and links) a program executable from binary
+// ----------------------------------------------------------------------
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Building the Program ..." << endl;
+#endif
+
+    errCode = clBuildProgram(Program, 1, &Target_Device_ID, NULL, NULL, NULL);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to build a Program Executable" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    // ------------------------Start to be defferent from sample host.cpp------------------------------
+    // -------------------------------------------------------------
+    // Step 3.4: Create Kernels
+    // -------------------------------------------------------------
+    cl_kernel K_layernorm, K_linear_qkv_multihead, K_attention_opt[NUM_HEADS],
+        K_projection_out, K_residual[2], K_mlp_q;
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating a Kernel: layernorm ..." << endl;
+#endif
+    K_layernorm = clCreateKernel(Program, "layernorm", &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+                << "HOST-Error: Failed to create K_layernorm" << endl
+                << endl;
+        return EXIT_FAILURE;
+    }
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating a Kernel: linear_qkv_multihead ..." << endl;
+#endif
+    K_linear_qkv_multihead = clCreateKernel(Program, "linear_qkv_multihead", &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to create K_linear_qkv_multihead" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating Kernels: attention_opt[0.." << (FRAME * NUM_HEADS - 1) << "] ..." << endl;
+#endif
+    for (int idx = 0; idx < NUM_HEADS; idx++)
+    {
+        K_attention_opt[idx] = clCreateKernel(Program, "attention_opt", &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to create K_attention_opt[" << idx << "]" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+    }
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating a Kernel: projection_out ..." << endl;
+#endif
+    K_projection_out = clCreateKernel(Program, "projection_out", &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to create K_projection_out" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating a Kernel: residual ..." << endl;
+#endif
+    for (int i = 0; i < 2; i++)
+    {
+        K_residual[i] = clCreateKernel(Program, "residual", &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                << "HOST-Error: Failed to create K_residual[" << i << "]" << endl
+                << endl;
+            return EXIT_FAILURE;
+        }
+    }
+    
+
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Creating a Kernel: mlp_q ..." << endl;
+#endif
+    K_mlp_q = clCreateKernel(Program, "mlp_q", &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "HOST-Error: Failed to create K_mlp_q" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    // ================================================================
+    // Step 4: Prepare Data to Run Kernel
+    // ================================================================
+    //   o) Allocate and initialize spatial encoder input and weights
+    //   o) Allocate Q/K/V, attention, MLP, and final output arrays
+    //   o) Create Buffers in Global Memory to store FPGA data
+    // ================================================================
+    // allocate host memory for spatial encoder input, weights, and outputs
+    float (*X)[EMBED_DIM]; // FRAME * SEQ_LEN * EMBED_DIM
+
+    // model params
+    float *LayerNorm_gamma;                // EMBED_DIM
+    float *LayerNorm_beta;                 // EMBED_DIM
+    int8_t (*Wq)[EMBED_DIM];               // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM)
+    int8_t (*Wq_Linear_Packed)[EMBED_DIM]; // EMBED_DIM * EMBED_DIM, output-major for fused LN+QKV
+    float *bq;                             // HEAD_NUM * HEAD_DIM
+    float *scale_wq;                       // HEAD_NUM * HEAD_DIM
+    int8_t (*Wk)[EMBED_DIM];               // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM)
+    int8_t (*Wk_Linear_Packed)[EMBED_DIM]; // EMBED_DIM * EMBED_DIM, output-major for fused LN+QKV
+    float *bk;                             // HEAD_NUM * HEAD_DIM
+    float *scale_wk;                       // HEAD_NUM * HEAD_DIM
+    int8_t (*Wv)[EMBED_DIM];               // EMBED_DIM * EMBED_DIM (EMBED_DIM * NUM_HEADS * HEAD_DIM)
+    int8_t (*Wv_Linear_Packed)[EMBED_DIM]; // EMBED_DIM * EMBED_DIM, output-major for fused LN+QKV
+    float *bv;                             // HEAD_NUM * HEAD_DIM
+    float *scale_wv;                       // HEAD_NUM * HEAD_DIM
+    // attention ouput projection weight
+    int8_t (*Wout)[EMBED_DIM];   // EMBED_DIM * EMBED_DIM (NUM_HEADS * HEAD_DIM * EMBED_DIM)
+    float *bout;                 // HEAD_NUM * HEAD_DIM
+    float *scale_wout;           // HEAD_NUM * HEAD_DIM
+    float *LayerNorm1_gamma;     // EMBED_DIM
+    float *LayerNorm1_beta;      // EMBED_DIM
+    int8_t (*MLP_W1)[MLP_DIM];   // EMBED_DIM * MLP_DIM
+    float *MLP_b1;               // MLP_DIM
+    float *MLP_scale_w1;         // MLP_DIM
+    int8_t (*MLP_W2)[EMBED_DIM]; // MLP_DIM * EMBED_DIM
+    float *MLP_b2;               // EMBED_DIM
+    float *MLP_scale_w2;         // EMBED_DIM
+
+    // intermediate value
+    float *LayerNorm_scaler;           // FRAME * SEQ_LEN
+    int8_t (*X_norm)[EMBED_DIM];       // FRAME * SEQ_LEN * EMBED_DIM
+    float (*Q)[SEQ_LEN][HEAD_DIM];     // FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM
+    float (*K_out)[SEQ_LEN][HEAD_DIM]; // FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM
+    float (*V)[SEQ_LEN][HEAD_DIM];     // FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM
+
+    float (*Attention_Out)[SEQ_LEN][HEAD_DIM];          // FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM
+    int8_t (*Attention_Out_Quant)[SEQ_LEN][HEAD_DIM];   // FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM
+    float *Attention_Quant_Scales;                      // FRAME * SEQ_LEN
+    int8_t (*Attention_Concat)[EMBED_DIM];              // FRAME * SEQ_LEN * EMBED_DIM
+    float (*Attention_Projected)[EMBED_DIM];            // FRAME * SEQ_LEN * EMBED_DIM
+    float (*After_Attention_Residual_Float)[EMBED_DIM]; // FRAME * SEQ_LEN * EMBED_DIM
+    uint32_t (*MLP_Output_Packed)[MLP_CHUNK_U32];       // FRAME * SEQ_LEN * EMBED_DIM fp32 bits
+    int8_t (*MLP_W1_Packed)[32];                        // MLP_DIM * EMBED_DIM int8
+    int8_t (*MLP_W2_Packed)[32];                        // EMBED_DIM * MLP_DIM int8
+
+#ifdef ALL_MESSAGES
+    cout << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 4) Prepare Data to Run Kernels                           " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+#endif
+
+    // ------------------------------------------------------------------
+    // Step 4.1: Allocate and initialize spatial encoder arrays
+    // ------------------------------------------------------------------
+    void *ptr = nullptr;
+    // config memory
+    X = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(float)));
+
+    LayerNorm_gamma = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    LayerNorm_beta = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    Wq = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int8_t)));
+    Wq_Linear_Packed = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int8_t)));
+    bq = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    scale_wq = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    Wk = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int8_t)));
+    Wk_Linear_Packed = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int8_t)));
+    bk = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    scale_wk = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    Wv = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int8_t)));
+    Wv_Linear_Packed = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int8_t)));
+    bv = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    scale_wv = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    Wout = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(EMBED_DIM * EMBED_DIM * sizeof(int8_t)));
+    bout = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    scale_wout = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    LayerNorm1_gamma = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    LayerNorm1_beta = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    MLP_W1 = reinterpret_cast<int8_t (*)[MLP_DIM]>(host_aligned_alloc(EMBED_DIM * MLP_DIM * sizeof(int8_t)));
+    MLP_b1 = reinterpret_cast<float *>(host_aligned_alloc(MLP_DIM * sizeof(float)));
+    MLP_scale_w1 = reinterpret_cast<float *>(host_aligned_alloc(MLP_DIM * sizeof(float)));
+    MLP_W2 = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(MLP_DIM * EMBED_DIM * sizeof(int8_t)));
+    MLP_b2 = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+    MLP_scale_w2 = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+
+    X_norm = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int8_t)));
+    LayerNorm_scaler = reinterpret_cast<float *>(host_aligned_alloc(FRAME * SEQ_LEN * sizeof(float)));
+    Q = reinterpret_cast<float (*)[SEQ_LEN][HEAD_DIM]>(host_aligned_alloc(FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float)));
+    K_out = reinterpret_cast<float (*)[SEQ_LEN][HEAD_DIM]>(host_aligned_alloc(FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float)));
+    V = reinterpret_cast<float (*)[SEQ_LEN][HEAD_DIM]>(host_aligned_alloc(FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float)));
+    Attention_Out = reinterpret_cast<float (*)[SEQ_LEN][HEAD_DIM]>(host_aligned_alloc(FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float)));
+    Attention_Out_Quant = reinterpret_cast<int8_t (*)[SEQ_LEN][HEAD_DIM]>(host_aligned_alloc(FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(int8_t)));
+    Attention_Quant_Scales = reinterpret_cast<float *>(host_aligned_alloc(FRAME * SEQ_LEN * sizeof(float)));
+
+    Attention_Concat = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(int8_t)));
+    Attention_Projected = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(float)));
+    After_Attention_Residual_Float = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(FRAME * SEQ_LEN * EMBED_DIM * sizeof(float)));
+    MLP_Output_Packed = reinterpret_cast<uint32_t (*)[MLP_CHUNK_U32]>(host_aligned_alloc(FRAME * MLP_OUTPUT_CHUNKS * MLP_CHUNK_U32 * sizeof(uint32_t)));
+    MLP_W1_Packed = reinterpret_cast<int8_t (*)[32]>(host_aligned_alloc(MLP_W1_CHUNKS * 32 * sizeof(int8_t)));
+    MLP_W2_Packed = reinterpret_cast<int8_t (*)[32]>(host_aligned_alloc(MLP_W2_CHUNKS * 32 * sizeof(int8_t)));
+
+    if (!X || !LayerNorm_gamma || !LayerNorm_beta || !X_norm || !LayerNorm_scaler ||
+        !Wq || !bq || !scale_wq || !Wk || !bk || !scale_wk || !Wv || !bv || !scale_wv ||
+        !Wq_Linear_Packed || !Wk_Linear_Packed || !Wv_Linear_Packed ||
+        !Wout || !bout || !scale_wout || !LayerNorm1_gamma || !LayerNorm1_beta ||
+        !Q || !K_out || !V || !Attention_Out || !Attention_Out_Quant || !Attention_Quant_Scales ||
+        !Attention_Concat || !Attention_Projected ||
+        !After_Attention_Residual_Float ||
+        !MLP_Output_Packed || !MLP_W1_Packed || !MLP_W2_Packed ||
+        !MLP_W1 || !MLP_b1 || !MLP_scale_w1 || !MLP_W2 || !MLP_b2 || !MLP_scale_w2)
+    {
+        cout << endl
+             << "HOST-Error: Out of Memory during spatial encoder allocation" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
+    // Keep the original random initialization flow for fallback/debug reference.
+    /*
+    srand(0);
+    init_random_int(&X[0][0], SEQ_LEN * EMBED_DIM, -2, 2);
+    init_random_int(&Wq[0][0], EMBED_DIM * EMBED_DIM, -1, 1);
+    init_random_int(bq, EMBED_DIM, -1, 1);
+    init_random_int(&Wk[0][0], EMBED_DIM * EMBED_DIM, -1, 1);
+    init_random_int(bk, EMBED_DIM, -1, 1);
+    init_random_int(&Wv[0][0], EMBED_DIM * EMBED_DIM, -1, 1);
+    init_random_int(bv, EMBED_DIM, -1, 1);
+    init_random_int(&MLP_W1[0][0], EMBED_DIM * MLP_DIM, -1, 1);
+    init_random_int(MLP_b1, MLP_DIM, -1, 1);
+    init_random_int(&MLP_W2[0][0], MLP_DIM * EMBED_DIM, -1, 1);
+    init_random_int(MLP_b2, EMBED_DIM, -1, 1);
+    */
+
+    // params path
+    const string x_input_file = "/home/undergraduate/rjchen25/ViViT/params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt";
+    // TODO: add advanced semantics?
+    if (!load_txt_values_as_float(x_input_file, &X[0][0], FRAME * SEQ_LEN * EMBED_DIM))
+    {
+        cout << endl
+             << "HOST-Error: Failed to load encoder input X from " << x_input_file << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    cout << "HOST-Info: Loaded spatial encoder input X from " << x_input_file << endl;
+
+    cout << endl;
+
+// ------------------------------------------------------------------
+// Step 4.2: Create Buffers in Global Memory to store data
+//             o) GlobMem_BUF_X                 - stores fp32 attention input X (R)
+//             o) GlobMem_BUF_LayerNorm_Gamma   - stores LayerNorm gamma (R)
+//             o) GlobMem_BUF_LayerNorm_Beta    - stores LayerNorm beta (R)
+//             o) GlobMem_BUF_X_norm            - stores int8 LayerNorm output (R/W)
+//             o) GlobMem_BUF_LayerNorm_Scaler  - stores LayerNorm scaler[SEQ_LEN] (R/W)
+//             o) GlobMem_BUF_Wq/bq/scale_wq    - stores Q quantized weights, bias, and scaler (R)
+//             o) GlobMem_BUF_Wk/bk/scale_wk    - stores K quantized weights, bias, and scaler (R)
+//             o) GlobMem_BUF_Wv/bv/scale_wv    - stores V quantized weights, bias, and scaler (R)
+//             o) GlobMem_BUF_Q/K/V             - stores fp32 Q/K/V outputs (R/W)
+//             o) GlobMem_BUF_Attention_Out     - stores attention output from all heads (R/W)
+// ------------------------------------------------------------------
+// TODO: Add mlp weights and bias buffer
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: Allocating buffers in Global Memory to store Input and Output Data ..." << endl;
+#endif
+
+    // buffer relative to X
+    // GlobMem_BUF_X --> {LayerNorm 1 & linear KQV} --> GlobMem_BUF_Attention_Out --> {projected output} --> GlobMem_BUF_frame_Attention_Projected --> {residual} --> GlobMem_BUF_After_Attention_Residual_Float 
+    // --> {LayerNorm} --> GlobMem_BUF_X_norm --> {MLP} --> GlobMem_BUF_MLP_Output --> {residual} --> GlobMem_BUF_X
+    
+    // parent buffer
+    cl_mem GlobMem_BUF_X, GlobMem_BUF_Attention_Out, GlobMem_BUF_Attention_Projected, 
+        GlobMem_BUF_After_Attention_Residual_Float, GlobMem_BUF_X_norm, GlobMem_BUF_MLP_Output;
+    // X's auxiliary buffer
+    cl_mem GlobMem_BUF_LayerNorm_Scaler, GlobMem_BUF_Q, GlobMem_BUF_K, GlobMem_BUF_V;
+
+    // subbuffer for X
+    cl_mem GlobMem_BUF_frame_X[FRAME], GlobMem_BUF_frame_Attention_Out[FRAME], GlobMem_BUF_frame_Attention_Projected[FRAME],
+        GlobMem_BUF_frame_After_Attention_Residual_Float[FRAME], GlobMem_BUF_frame_X_norm[FRAME], GlobMem_BUF_frame_MLP_Output[FRAME];
+
+    cl_mem GlobMem_BUF_frame_LayerNorm_Scaler[FRAME], GlobMem_BUF_frame_Q[FRAME], GlobMem_BUF_frame_K[FRAME], GlobMem_BUF_frame_V[FRAME];
+    
+    // weight buffer
+    cl_mem GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta,
+        GlobMem_BUF_Wq, GlobMem_BUF_bq, GlobMem_BUF_scale_wq,
+        GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_scale_wk,
+        GlobMem_BUF_Wv, GlobMem_BUF_bv, GlobMem_BUF_scale_wv,
+        GlobMem_BUF_Wout, GlobMem_BUF_bout, GlobMem_BUF_scale_wout,
+        GlobMem_BUF_MLP_W1, GlobMem_BUF_MLP_W2,
+        GlobMem_BUF_MLP_b1, GlobMem_BUF_MLP_b2,
+        GlobMem_BUF_MLP_scale_w1, GlobMem_BUF_MLP_scale_w2;
+
+    OCL_CHECK(errCode, GlobMem_BUF_X = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * EMBED_DIM * sizeof(float), X, &errCode), 
+        "Host-Error: Failed to allocate GlobMem_BUF_X");
+    OCL_CHECK(errCode, GlobMem_BUF_Attention_Out = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float), Attention_Out, &errCode), 
+        "Host-Error: Failed to allocate GlobMem_BUF_Attention_Out");
+    OCL_CHECK(errCode, GlobMem_BUF_Attention_Projected = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * EMBED_DIM * sizeof(float), Attention_Projected, &errCode),
+        "Host-Error: Failed to allocate GlobMem_BUF_Attention_Projected");
+    OCL_CHECK(errCode, GlobMem_BUF_After_Attention_Residual_Float = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * EMBED_DIM * sizeof(float), After_Attention_Residual_Float, &errCode), 
+        "Host-Error: Failed to allocate GlobMem_BUF_After_Attention_Residual_Float");
+    OCL_CHECK(errCode, GlobMem_BUF_X_norm = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * EMBED_DIM * sizeof(int8_t), X_norm, &errCode),
+        "Host-Error: Failed to allocate GlobMem_BUF_X_norm");
+    OCL_CHECK(errCode, GlobMem_BUF_MLP_Output = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * MLP_OUTPUT_CHUNKS * MLP_CHUNK_U32 * sizeof(uint32_t), MLP_Output_Packed, &errCode),
+        "Host-Error: Failed to allocate GlobMem_BUF_MLP_Output");
+    
+
+    OCL_CHECK(errCode, GlobMem_BUF_LayerNorm_Scaler = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * SEQ_LEN * sizeof(float), LayerNorm_scaler, &errCode),
+        "Host-Error: Failed to allocate GlobMem_BUF_LayerNorm_Scaler");
+    OCL_CHECK(errCode, GlobMem_BUF_Q = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float), Q, &errCode), 
+        "Host-Error: Failed to allocate GlobMem_BUF_Q");
+    OCL_CHECK(errCode, GlobMem_BUF_K = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float), K_out, &errCode), 
+        "Host-Error: Failed to allocate GlobMem_BUF_K");
+    OCL_CHECK(errCode, GlobMem_BUF_V = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, FRAME * NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float), V, &errCode), 
+        "Host-Error: Failed to allocate GlobMem_BUF_V");
+    
+    // ================================================
+    //                  Ceate SubBuffer
+    // ================================================
+    size_t frame_size_X = SEQ_LEN * EMBED_DIM * sizeof(float);
+    size_t frame_size_X_norm = SEQ_LEN * EMBED_DIM * sizeof(int8_t);
+    size_t frame_size_scaler = SEQ_LEN * sizeof(float);
+    size_t frame_size_QKV = NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float);
+    size_t frame_size_Attention_Out = NUM_HEADS * SEQ_LEN * HEAD_DIM * sizeof(float);
+    size_t frame_size_Attention_Projected = SEQ_LEN * EMBED_DIM * sizeof(float);
+    size_t frame_size_After_Attention_Residual_Float = SEQ_LEN * EMBED_DIM * sizeof(float);
+    size_t frame_size_MLP_Output = SEQ_LEN * EMBED_DIM * sizeof(float);
+    string errmsg;
+    for (int f = 0; f < FRAME; f++)
+    {
+        cl_buffer_region region;
+
+        // ---------------- X ----------------
+        region.origin = f * frame_size_X;
+        region.size = frame_size_X;
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_X creation failed at frame " + to_string(f);
+        OCL_CHECK(errCode, GlobMem_BUF_frame_X[f] = clCreateSubBuffer(
+            GlobMem_BUF_X, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+
+        // ---------------- Attention Out ----------------
+        region.origin = f * frame_size_Attention_Out;
+        region.size = frame_size_Attention_Out;
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_Attention_Out creation failed at frame " + to_string(f);
+        OCL_CHECK(errCode, GlobMem_BUF_frame_Attention_Out[f] = clCreateSubBuffer(
+            GlobMem_BUF_Attention_Out, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+
+        // ---------------- Attention Projected Float ----------------
+        region.origin = f * frame_size_Attention_Projected;
+        region.size = frame_size_Attention_Projected;
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_Attention_Projected creation failed at frame " + to_string(f);
+        OCL_CHECK(errCode, GlobMem_BUF_frame_Attention_Projected[f] = clCreateSubBuffer(
+            GlobMem_BUF_Attention_Projected, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+
+        
+        // ---------------- Attention Residual Float ----------------
+        region.origin = f * frame_size_After_Attention_Residual_Float;
+        region.size = frame_size_After_Attention_Residual_Float;
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_After_Attention_Residual_Float creation failed at frame " + to_string(f);
+        OCL_CHECK(errCode, GlobMem_BUF_frame_After_Attention_Residual_Float[f] = clCreateSubBuffer(
+            GlobMem_BUF_After_Attention_Residual_Float, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+
+        // ---------------- X_norm ----------------
+        region.origin = f * frame_size_X_norm;
+        region.size = frame_size_X_norm;
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_X_norm creation failed at frame " + to_string(f);
+        OCL_CHECK(errCode, GlobMem_BUF_frame_X_norm[f] = clCreateSubBuffer(
+            GlobMem_BUF_X_norm, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+
+
+        // ---------------- LayerNorm scaler ----------------
+        region.origin = f * frame_size_scaler;
+        region.size = frame_size_scaler;
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_LayerNorm_Scaler creation failed at frame " + to_string(f);
+        OCL_CHECK(errCode, GlobMem_BUF_frame_LayerNorm_Scaler[f] = clCreateSubBuffer(
+            GlobMem_BUF_LayerNorm_Scaler, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+
+        // ---------------- MLP_Output ----------------
+        region.origin = f * frame_size_MLP_Output;
+        region.size = frame_size_MLP_Output;
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_MLP_Output creation failed at frame " + to_string(f);
+        OCL_CHECK(errCode, GlobMem_BUF_frame_MLP_Output[f] = clCreateSubBuffer(
+            GlobMem_BUF_MLP_Output, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+
+        // ---------------- Q/K/V full frame ----------------
+        region.origin = f * frame_size_QKV;
+        region.size = frame_size_QKV;
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_Q creation failed at frame " + to_string(f);
+        OCL_CHECK(errCode, GlobMem_BUF_frame_Q[f] = clCreateSubBuffer(
+            GlobMem_BUF_Q, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_K creation failed at frame " + to_string(f);        
+        OCL_CHECK(errCode, GlobMem_BUF_frame_K[f] = clCreateSubBuffer(
+            GlobMem_BUF_K, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+        
+        errmsg = "Host-Error: SubBuffer GlobMem_BUF_frame_V creation failed at frame " + to_string(f);        
+        OCL_CHECK(errCode, GlobMem_BUF_frame_V[f] = clCreateSubBuffer(
+            GlobMem_BUF_V, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &errCode),
+            errmsg);
+    }
+
+    // ref: clCreateBuffer method
+    // https://www.cnblogs.com/willhua/p/9463515.html
+    // https://zhuanlan.zhihu.com/p/684133601
+    // don't care loading data at later
+    OCL_CHECK(errCode, GlobMem_BUF_LayerNorm_Gamma = clCreateBuffer(
+        Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), LayerNorm_gamma, &errCode), 
+        "Host-Error: Failed to allocate GlobMem_BUF_LayerNorm_Gamma");
+
+    OCL_CHECK(errCode, GlobMem_BUF_LayerNorm_Beta = clCreateBuffer(
+        Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), LayerNorm_beta, &errCode),
+        "Host-Error: Failed to allocate GlobMem_BUF_LayerNorm_Beta");
+
+    OCL_CHECK(errCode, GlobMem_BUF_Wq = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * EMBED_DIM * sizeof(int8_t), Wq_Linear_Packed, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_Wq");
+
+    OCL_CHECK(errCode, GlobMem_BUF_bq = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), bq, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_bq");
+
+    OCL_CHECK(errCode, GlobMem_BUF_scale_wq = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), scale_wq, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_scale_wq");
+
+    OCL_CHECK(errCode, GlobMem_BUF_Wk = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * EMBED_DIM * sizeof(int8_t), Wk_Linear_Packed, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_Wk");
+
+    OCL_CHECK(errCode, GlobMem_BUF_bk = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), bk, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_bk");
+
+    OCL_CHECK(errCode, GlobMem_BUF_scale_wk = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), scale_wk, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_scale_wk");
+
+    OCL_CHECK(errCode, GlobMem_BUF_Wv = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * EMBED_DIM * sizeof(int8_t), Wv_Linear_Packed, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_Wv");
+
+    OCL_CHECK(errCode, GlobMem_BUF_bv = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), bv, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_bv");
+
+    OCL_CHECK(errCode, GlobMem_BUF_scale_wv = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), scale_wv, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_scale_wv");
+
+    OCL_CHECK(errCode, GlobMem_BUF_Wout = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * EMBED_DIM * sizeof(int8_t), Wout, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_Wout");
+
+    OCL_CHECK(errCode, GlobMem_BUF_bout = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), bout, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_bout");
+
+    OCL_CHECK(errCode, GlobMem_BUF_scale_wout = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), scale_wout, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_scale_wout");
+
+    OCL_CHECK(errCode, GlobMem_BUF_MLP_W1 = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, MLP_W1_CHUNKS * 32 * sizeof(int8_t), MLP_W1_Packed, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_MLP_W1");
+
+    OCL_CHECK(errCode, GlobMem_BUF_MLP_W2 = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, MLP_W2_CHUNKS * 32 * sizeof(int8_t), MLP_W2_Packed, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_MLP_W2");
+
+    OCL_CHECK(errCode, GlobMem_BUF_MLP_b1 = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, MLP_DIM * sizeof(float), MLP_b1, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_MLP_b1");
+
+    OCL_CHECK(errCode, GlobMem_BUF_MLP_b2 = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), MLP_b2, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_MLP_b2");
+
+    OCL_CHECK(errCode, GlobMem_BUF_MLP_scale_w1 = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, MLP_DIM * sizeof(float), MLP_scale_w1, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_MLP_scale_w1");
+
+    OCL_CHECK(errCode, GlobMem_BUF_MLP_scale_w2 = clCreateBuffer(
+            Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), MLP_scale_w2, &errCode),
+            "Host-Error: Failed to allocate GlobMem_BUF_MLP_scale_w2");
+
+    // ============================================================================
+    // Step 5: Run 12 Spatial Transformer encoder blocks in sequence
+    // ============================================================================
+#ifdef ALL_MESSAGES
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 5) Run 12 Spatial Encoder Blocks                        " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+#endif
+
+    double Host_Post_Time_ms = 0.0;
+    int Total_Kernel_Events = 0;
+    int Total_Memory_Events = 0;
+    vector<cl_event> Profiling_Kernel_Events;
+    vector<cl_event> Profiling_Memory_Events;
+    vector<string> Profiling_Kernel_Names;
+
+    // each frame
+    const int Nb_Of_Mem_Events = 10;
+    const int Nb_Of_Exe_Events = 6;
+    const int Nb_Of_Att_Events = NUM_HEADS;
+    cl_event Mem_op_event[Nb_Of_Mem_Events];
+    cl_event K_exe_event[Nb_Of_Exe_Events];
+    cl_event A_exe_event[Nb_Of_Att_Events];
+    // ============================================================================
+    // EVENT EXECUTION PIPELINE (PER FRAME, PER BLOCK)
+    // ============================================================================
+    //   [MEMORY STAGE]
+    //   1. Migrate fused LayerNorm + QKV input/output buffers to device
+    //        -> Mem_op_event[0 ~ 1]
+    //      Migrate attention_opt output buffer 
+    //        -> Mem_op_event[2]
+    //      Migrate Projected Wout weight & output buffer 
+    //        -> Mem_op_event[3, 4]
+    //      Migrate Residual Output buffer
+    //        -> Mem_op_event[5]
+    //      Migrate LayerNorm1 weight
+    //        -> wait K_event_[1]
+    //        -> Mem_op_event[6, 7] (Mem_op_event[7] doesn't need to wait since it's output buffer)
+    //      Migrate MLP weight
+    //        -> Mem_op_event[8]
+    //      Migrate MLP Output buffer
+    //        -> Mem_op_event[9]
+    //   [STAGE 1: FUSED LAYERNORM 0 + QKV PROJECTION]
+    //   2. K_linear_qkv_multihead
+    //        waits: Mem_op_event[0], Mem_op_event[1]
+    //        produces: K_exe_event[0]
+    //   [STAGE 3: MULTI-HEAD ATTENTION]
+    //   4. K_attention_opt[h] for each head
+    //        waits: K_exe_event[0], Mem_op_event[2]
+    //        produces: A_exe_event[h] for h in [0..NUM_HEADS-1]
+    //   [STAGE 4: ATTENTION PROJECTION OUT]
+    //   5. K_
+    //        waits: ALL A_exe_event[], Mem_op_event[3, 4]
+    //        produces: K_exe_event[1]
+    //   [STAGE 5: RESIDUAL 0]
+    //   6. residual 
+    //        waits: K_exe_event[1], Mem_op_event[5]
+    //        produces: K_exe_event[2]
+    //   [STAGE 6: LAYERNORM 1]
+    //   7. K_layernorm (LN1)
+    //        waits: K_exe_event[2], Mem_op_event[6, 7]
+    //        produces: K_exe_event[3]
+    //   [STAGE 7: MLP]
+    //   8. K_mlp_q
+    //        waits: K_exe_event[3], Mem_op_event[8, 9]
+    //        produces: K_exe_event[4]
+    //   [STAGE 8: RESIDUAL 1]
+    //   9. residual
+    //        waits: K_exe_event[4], (no params, and GlobMem_BUF_frame_X already on device)
+    //        produces: K_exe_event[5]
+    // ============================================================================
+
+    // TODO: fix the code location of record host time
+    auto Host_Post_Start = chrono::high_resolution_clock::now();
+
+    for (int block = 0; block < NUM_ENCODER_BLOCKS; block++)
+    {
+
+        // memset(Mem_op_event, 0, sizeof(Mem_op_event));
+        // memset(K_exe_event, 0, sizeof(K_exe_event));
+        // memset(A_exe_event, 0, sizeof(A_exe_event));
+
+
+        const string spatial_encoder_dir = "/home/undergraduate/rjchen25/ViViT/params/all_params/SpatialTransformer/encoderblock_" + to_string(block) + "/";
+        cout << "HOST_Info: Running encoder block " << block << endl;
+        cout << "HOST-Info: Loading parameters for encoder block " << block << " from " << spatial_encoder_dir << endl;
+
+        // loading weight per block
+        if (!load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_0_scale.txt", LayerNorm_gamma, EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_0_bias.txt", LayerNorm_beta, EMBED_DIM) ||
+            !load_txt_values_as_int8(spatial_encoder_dir + "MultiHeadDotProductAttention_0_query_kernel_qvalue.txt", &Wq[0][0], EMBED_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_query_bias.txt", bq, EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_query_kernel_scale.txt", scale_wq, EMBED_DIM) ||
+            !load_txt_values_as_int8(spatial_encoder_dir + "MultiHeadDotProductAttention_0_key_kernel_qvalue.txt", &Wk[0][0], EMBED_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_key_bias.txt", bk, EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_key_kernel_scale.txt", scale_wk, EMBED_DIM) ||
+            !load_txt_values_as_int8(spatial_encoder_dir + "MultiHeadDotProductAttention_0_value_kernel_qvalue.txt", &Wv[0][0], EMBED_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_value_bias.txt", bv, EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_value_kernel_scale.txt", scale_wv, EMBED_DIM) ||
+            !load_txt_values_as_int8(spatial_encoder_dir + "MultiHeadDotProductAttention_0_out_kernel_qvalue.txt", &Wout[0][0], EMBED_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_out_bias.txt", bout, EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_out_kernel_scale.txt", scale_wout, EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_1_scale.txt", LayerNorm1_gamma, EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_1_bias.txt", LayerNorm1_beta, EMBED_DIM) ||
+            !load_txt_values_as_int8(spatial_encoder_dir + "MlpBlock_0_Dense_0_kernel_qvalue.txt", &MLP_W1[0][0], EMBED_DIM * MLP_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_0_bias.txt", MLP_b1, MLP_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_0_kernel_scale.txt", MLP_scale_w1, MLP_DIM) ||
+            !load_txt_values_as_int8(spatial_encoder_dir + "MlpBlock_0_Dense_1_kernel_qvalue.txt", &MLP_W2[0][0], MLP_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_1_bias.txt", MLP_b2, EMBED_DIM) ||
+            !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_1_kernel_scale.txt", MLP_scale_w2, EMBED_DIM))
+        {
+            cout << endl
+                 << "HOST-Error: Failed to load one or more parameter files for encoder block " << block << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        // TODO: useless?
+        pack_linear_layernorm_weight(Wq, Wq_Linear_Packed);
+        pack_linear_layernorm_weight(Wk, Wk_Linear_Packed);
+        pack_linear_layernorm_weight(Wv, Wv_Linear_Packed);
+        pack_mlp_weights(MLP_W1, MLP_W2, MLP_W1_Packed, MLP_W2_Packed);
+
+        // create subbuffer for KQV first
+        // already consider frame term (create all buffer)
+        cl_mem GlobMem_BUF_head_Q[FRAME * NUM_HEADS] = {NULL};
+        cl_mem GlobMem_BUF_head_K[FRAME * NUM_HEADS] = {NULL};
+        cl_mem GlobMem_BUF_head_V[FRAME * NUM_HEADS] = {NULL};
+        cl_mem GlobMem_BUF_head_Out[FRAME * NUM_HEADS] = {NULL};
+        const size_t HEAD_BYTES = SEQ_LEN * HEAD_DIM * sizeof(float);
+        const size_t HEAD_BYTES_OUT = SEQ_LEN * HEAD_DIM * sizeof(float);
+        // cut sub-buffer
+        for (int frame = 0; frame < FRAME; frame++)
+        {
+            for (int h = 0; h < NUM_HEADS; h++)
+            {
+                cl_buffer_region head_region, head_region_out;
+                int idx = frame * NUM_HEADS + h;
+                head_region.origin = static_cast<size_t>(idx) * HEAD_BYTES;
+                head_region.size = HEAD_BYTES;
+                head_region_out.origin = static_cast<size_t>(idx) * HEAD_BYTES_OUT;
+                head_region_out.size = HEAD_BYTES_OUT;
+
+                // TODO: FLAG is right?
+                OCL_CHECK(errCode, GlobMem_BUF_head_Q[idx] = clCreateSubBuffer(GlobMem_BUF_Q, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode),
+                    "failed to create head sub-buffer for Q");
+                OCL_CHECK(errCode, GlobMem_BUF_head_K[idx] = clCreateSubBuffer(GlobMem_BUF_K, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode),
+                    "failed to create head sub-buffer for K");
+                OCL_CHECK(errCode, GlobMem_BUF_head_V[idx] = clCreateSubBuffer(GlobMem_BUF_V, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode),
+                    "failed to create head sub-buffer for V");
+                OCL_CHECK(errCode, GlobMem_BUF_head_Out[idx] = clCreateSubBuffer(GlobMem_BUF_Attention_Out, CL_MEM_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region_out, &errCode),
+                    "failed to create head sub-buffer for Out");
+            }
+        }
+
+        // setting Args & run
+        for (int frame = 0; frame < FRAME; frame++)
+        {
+            //string location = "frame: " + to_string(frame) + ", block: " + to_string(block) + ", head: " + to_string(h) + "\n";
+            string location = "frame: " + to_string(frame) + ", block: " + to_string(block) + "\n";
+            cout << "HOST-Info: Running " << location << endl;
+
+            memset(Mem_op_event, 0, sizeof(Mem_op_event));
+            memset(K_exe_event, 0, sizeof(K_exe_event));
+            memset(A_exe_event, 0, sizeof(A_exe_event));
+
+            // ========================== create subbuffer for KQV finish ===================================
+
+            // setting kenel Args
+
+            cout << "Setting Kernel" << endl;
+            // ----------------------------------------
+            // Step 5.1: Set Kernel Arguments
+            // ----------------------------------------
+
+            // setting fused LN0 + linear_qkv_multihead Args
+            errCode = false;
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 0, sizeof(cl_mem), &GlobMem_BUF_frame_X[frame]), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 0, sizeof(cl_mem), &GlobMem_BUF_frame_X[frame]), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 1, sizeof(cl_mem), &GlobMem_BUF_LayerNorm_Gamma), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 2, sizeof(cl_mem), &GlobMem_BUF_LayerNorm_Beta), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 3, sizeof(cl_mem), &GlobMem_BUF_Wk), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 4, sizeof(cl_mem), &GlobMem_BUF_Wv), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 5, sizeof(cl_mem), &GlobMem_BUF_Wq), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 6, sizeof(cl_mem), &GlobMem_BUF_bq), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 7, sizeof(cl_mem), &GlobMem_BUF_bk), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 8, sizeof(cl_mem), &GlobMem_BUF_bv), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 9, sizeof(cl_mem), &GlobMem_BUF_scale_wq), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 10, sizeof(cl_mem), &GlobMem_BUF_scale_wk), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 11, sizeof(cl_mem), &GlobMem_BUF_scale_wv), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 12, sizeof(cl_mem), &GlobMem_BUF_frame_Q[frame]), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 13, sizeof(cl_mem), &GlobMem_BUF_frame_K[frame]), "failed to set K_linear_qkv_multihead Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_linear_qkv_multihead, 14, sizeof(cl_mem), &GlobMem_BUF_frame_V[frame]), "failed to set K_linear_qkv_multihead Args");
+            
+            // each frame has 12 head_attention can parallel
+            for (int h = 0; h < NUM_HEADS; h++)
+            {
+                int idx = frame * NUM_HEADS + h;
+                // setting(update) K_attention_opt Args
+                errCode = false;
+                OCL_CHECK(errCode, errCode = clSetKernelArg(K_attention_opt[h], 0, sizeof(cl_mem), &GlobMem_BUF_head_Q[idx]), "failed to set K_attention_opt Args");
+                OCL_CHECK(errCode, errCode = clSetKernelArg(K_attention_opt[h], 1, sizeof(cl_mem), &GlobMem_BUF_head_K[idx]), "failed to set K_attention_opt Args");
+                OCL_CHECK(errCode, errCode = clSetKernelArg(K_attention_opt[h], 2, sizeof(cl_mem), &GlobMem_BUF_head_V[idx]), "failed to set K_attention_opt Args");
+                OCL_CHECK(errCode, errCode = clSetKernelArg(K_attention_opt[h], 3, sizeof(cl_mem), &GlobMem_BUF_head_Out[idx]), "failed to set K_attention_opt Args");
+            }
+
+            errCode = false;
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_projection_out, 0, sizeof(cl_mem), &GlobMem_BUF_frame_Attention_Out[frame]), "failed to set K_projection_out Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_projection_out, 1, sizeof(cl_mem), &GlobMem_BUF_Wout), "failed to set K_projection_out Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_projection_out, 2, sizeof(cl_mem), &GlobMem_BUF_bout), "failed to set K_projection_out Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_projection_out, 3, sizeof(cl_mem), &GlobMem_BUF_scale_wout), "failed to set K_projection_out Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_projection_out, 4, sizeof(cl_mem), &GlobMem_BUF_frame_Attention_Projected[frame]), "failed to set K_projection_out Args");
+
+
+            errCode = false;
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_residual[0], 0, sizeof(cl_mem), &GlobMem_BUF_frame_X[frame]), "failed to set K_residual[0] Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_residual[0], 1, sizeof(cl_mem), &GlobMem_BUF_frame_Attention_Projected[frame]), "failed to set K_residual[0] Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_residual[0], 2, sizeof(cl_mem), &GlobMem_BUF_frame_After_Attention_Residual_Float[frame]), "failed to set K_residual[0] Args");
+
+            errCode = false;
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_layernorm, 0, sizeof(cl_mem), &GlobMem_BUF_frame_After_Attention_Residual_Float[frame]), "failed to set K_layernorm Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_layernorm, 1, sizeof(cl_mem), &GlobMem_BUF_LayerNorm_Gamma), "failed to set K_layernorm Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_layernorm, 2, sizeof(cl_mem), &GlobMem_BUF_LayerNorm_Beta), "failed to set K_layernorm Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_layernorm, 3, sizeof(cl_mem), &GlobMem_BUF_frame_X_norm[frame]), "failed to set K_layernorm Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_layernorm, 4, sizeof(cl_mem), &GlobMem_BUF_frame_LayerNorm_Scaler[frame]), "failed to set K_layernorm Args");
+
+
+            errCode = false;
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_residual[1], 0, sizeof(cl_mem), &GlobMem_BUF_frame_After_Attention_Residual_Float[frame]), "failed to set K_residual[1] Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_residual[1], 1, sizeof(cl_mem), &GlobMem_BUF_frame_MLP_Output[frame]), "failed to set K_residual[1] Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_residual[1], 2, sizeof(cl_mem), &GlobMem_BUF_frame_X[frame]), "failed to set K_residual[1] Args");
+            
+            errCode = false;
+            int token_offset = 0;
+	        int valid_seq_len = SEQ_LEN;
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 0, sizeof(cl_mem), &GlobMem_BUF_frame_X_norm[frame]), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 1, sizeof(cl_mem), &GlobMem_BUF_frame_LayerNorm_Scaler[frame]), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 2, sizeof(cl_mem), &GlobMem_BUF_MLP_W1), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 3, sizeof(cl_mem), &GlobMem_BUF_MLP_W2), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 4, sizeof(cl_mem), &GlobMem_BUF_MLP_b1), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 5, sizeof(cl_mem), &GlobMem_BUF_MLP_b2), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 6, sizeof(cl_mem), &GlobMem_BUF_MLP_scale_w1), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 7, sizeof(cl_mem), &GlobMem_BUF_MLP_scale_w2), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 8, sizeof(cl_mem), &GlobMem_BUF_frame_MLP_Output[frame]), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 9, sizeof(int), &token_offset), "failed to set K_mlp_q Args");
+            OCL_CHECK(errCode, errCode = clSetKernelArg(K_mlp_q, 10, sizeof(int), &valid_seq_len), "failed to set K_mlp_q Args");
+            
+
+            // ------------------------------------------------------
+            // Step 5.2: Copy Input Data from Host to Global Memory
+            // ------------------------------------------------------
+            // move fused LayerNorm + QKV args to Device
+            // move Q/K/V output buffers to Device
+            // move Attention Output buffer to Device (TODO: is it useless?)
+            // ------------------------------------------------------
+            cl_mem LayerNorm_Input_Buffers[] = {
+                GlobMem_BUF_frame_X[frame], GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta};
+            cl_mem LayerNorm_Output_Buffers[] = {
+                GlobMem_BUF_frame_X_norm[frame], GlobMem_BUF_frame_LayerNorm_Scaler[frame]};
+            cl_mem LinearLayerNorm_Input_Buffers[] = { // input and weight
+                GlobMem_BUF_frame_X[frame],
+                GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta,
+                GlobMem_BUF_Wk, GlobMem_BUF_Wv, GlobMem_BUF_Wq,
+                GlobMem_BUF_bq, GlobMem_BUF_bk, GlobMem_BUF_bv,
+                GlobMem_BUF_scale_wq, GlobMem_BUF_scale_wk, GlobMem_BUF_scale_wv};
+            cl_mem QKV_Output_Buffers[] = {
+                GlobMem_BUF_frame_Q[frame], GlobMem_BUF_frame_K[frame], GlobMem_BUF_frame_V[frame]};
+            cl_mem Projection_Input_Buffers[] = {
+                GlobMem_BUF_Wout, GlobMem_BUF_bout, GlobMem_BUF_scale_wout};
+            cl_mem MLP_Param_Buffers[] = {
+                GlobMem_BUF_MLP_W1, GlobMem_BUF_MLP_W2,
+                GlobMem_BUF_MLP_b1, GlobMem_BUF_MLP_b2,
+                GlobMem_BUF_MLP_scale_w1, GlobMem_BUF_MLP_scale_w2};
+
+            cl_event layernorm1_datacopy = nullptr; // user event: after layernorm 0 is finish --> copy layernorm2 params to buffer at line:
+
+
+            if (block == 0)
+            {
+                OCL_CHECK(errCode, errCode = clEnqueueMigrateMemObjects(Command_Queue, 12, LinearLayerNorm_Input_Buffers, 0, 0, 
+                    NULL, &Mem_op_event[0]), 
+                    "failed to migrate [LinearLayerNorm_Input_Buffers] to device");
+            }
+            else
+            {
+                // only need to send weight
+                OCL_CHECK(errCode, errCode = clEnqueueMigrateMemObjects(Command_Queue, 11, LinearLayerNorm_Input_Buffers + 1, 0, 0, 
+                    NULL, &Mem_op_event[0]), 
+                    "failed to migrate [LinearLayerNorm_Input_Buffers without GlobMem_BUF_frame_X] to device");
+            }
+
+            OCL_CHECK(errCode, errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, QKV_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, 
+                NULL, &Mem_op_event[1]), 
+                "failed to migrate [ QKV_Output_Buffers ] to device");
+            OCL_CHECK(errCode, errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * NUM_HEADS], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, 
+                NULL, &Mem_op_event[2]), 
+                "failed to migrate [ GlobMem_BUF_head_Out[frame * NUM_HEADS] ] to device");
+            OCL_CHECK(errCode, errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, Projection_Input_Buffers, 0, 0, 
+                NULL, &Mem_op_event[3]), 
+                "failed to migrate [ Projection_Input_Buffers ] to device");
+            OCL_CHECK(errCode, errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_Attention_Projected[frame], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, 
+                NULL, &Mem_op_event[4]), 
+                "failed to migrate [ GlobMem_BUF_frame_Attention_Projected[frame] ] to device");
+            OCL_CHECK(errCode, errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_After_Attention_Residual_Float[frame], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, 
+                NULL, &Mem_op_event[5]), 
+                "failed to migrate [ GlobMem_BUF_frame_After_Attention_Residual_Float[frame] ] to device");
+            
+            OCL_CHECK(errCode, layernorm1_datacopy = clCreateUserEvent(Context, &errCode), "failed to create layernorm1_datacopy event");
+
+            OCL_CHECK(errCode, clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Input_Buffers + 1, 0, 1, 
+                &layernorm1_datacopy, &Mem_op_event[6]), 
+                "failed to migrate [ LayerNorm1_Input_Buffers ] to device");
+            OCL_CHECK(errCode, clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, 
+                NULL, &Mem_op_event[7]), 
+                "failed to migrate [ LayerNorm1_Output_Buffers ] to device");
+
+            OCL_CHECK(errCode, clEnqueueMigrateMemObjects(Command_Queue, 6, MLP_Param_Buffers, 0, 0, 
+                NULL, &Mem_op_event[8]), 
+                "failed to migrate [ MLP_Param_Buffers ] to device");
+            OCL_CHECK(errCode, clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_MLP_Output[frame], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, 
+                NULL, &Mem_op_event[9]), 
+                "failed to migrate [ GlobMem_BUF_frame_MLP_Output[frame] ] to device");
+            
+            
+            // ----------------------------------------
+            // Step 5.2: Event Setting & Packing
+            // ----------------------------------------
+            cl_event qkv_wait, attention_wait, projection_wait, residual0_wait, layernorm1_wait, mlp_wait;
+            cl_event qkv_wait_list[] = {Mem_op_event[0], Mem_op_event[1]};
+        
+            // ----------------------------------------
+            // Step 5.3: Submit Kernels for Execution
+            // ----------------------------------------
+
+            clEnqueueMarkerWithWaitList(Command_Queue, 2, qkv_wait_list, &qkv_wait);
+            OCL_CHECK(errCode, errCode = clEnqueueTask(Command_Queue, K_linear_qkv_multihead, 1, &qkv_wait, &K_exe_event[0]), "HOST-Error: Failed to submit linear_qkv_multihead for " + location);
+            
+            cl_event attention_wait_list[] = {K_exe_event[0], Mem_op_event[2]};
+
+            clEnqueueMarkerWithWaitList(Command_Queue, 2, attention_wait_list, &attention_wait);
+            for (int h = 0; h < NUM_HEADS; h++)
+            {
+                // Compute Attention
+                OCL_CHECK(errCode, errCode = clEnqueueTask(Command_Queue, K_attention_opt[h], 1, &attention_wait, &A_exe_event[h]), "HOST-Error: Failed to submit attention for " + location);
+            }
+
+            cl_event projection_wait_list[NUM_HEADS + 2];
+            for (int h = 0; h < NUM_HEADS; h++)
+                projection_wait_list[h] = A_exe_event[h];
+            projection_wait_list[NUM_HEADS] = Mem_op_event[3];
+            projection_wait_list[NUM_HEADS + 1] = Mem_op_event[4];
+
+            clEnqueueMarkerWithWaitList(Command_Queue, NUM_HEADS + 2, projection_wait_list, &projection_wait);
+            OCL_CHECK(errCode, errCode = clEnqueueTask(Command_Queue, K_projection_out, 1, &projection_wait, &K_exe_event[1]), "HOST-Error: Failed to submit projection_out for " + location);
+
+            cl_event residual_wait_list[] = {K_exe_event[1], Mem_op_event[5]};
+
+            clEnqueueMarkerWithWaitList(Command_Queue, 2, residual_wait_list, &residual0_wait);
+            OCL_CHECK(errCode, errCode = clEnqueueTask(Command_Queue, K_residual[0], 1, &residual0_wait, &K_exe_event[2]), "HOST-Error: Failed to submit residual[0] for " + location);
+
+            cl_event layernorm1_wait_list[] = {K_exe_event[2], Mem_op_event[6], Mem_op_event[7]};
+
+            // TODO: data race with LayerNorm&Linear_fuse weight ?
+            clWaitForEvents(1, &K_exe_event[0]);
+            memcpy(LayerNorm_gamma, LayerNorm1_gamma, EMBED_DIM * sizeof(float));
+            memcpy(LayerNorm_beta, LayerNorm1_beta, EMBED_DIM * sizeof(float));
+            clSetUserEventStatus(layernorm1_datacopy, CL_COMPLETE);
+
+
+            clEnqueueMarkerWithWaitList(Command_Queue, 3, layernorm1_wait_list, &layernorm1_wait);
+            OCL_CHECK(errCode, errCode = clEnqueueTask(Command_Queue, K_layernorm, 1, &layernorm1_wait, &K_exe_event[3]), "HOST-Error: Failed to submit LN1 layernorm for " + location);
+
+            cl_event mlp_wait_list[] = {K_exe_event[3], Mem_op_event[8], Mem_op_event[9]};
+
+            clEnqueueMarkerWithWaitList(Command_Queue, 3, mlp_wait_list, &mlp_wait);
+            OCL_CHECK(errCode, errCode = clEnqueueTask(Command_Queue, K_mlp_q, 1, &mlp_wait, &K_exe_event[4]), "HOST-Error: Failed to submit MLP kernel for " + location);
+
+            clWaitForEvents(1, &K_exe_event[4]);
+            cout << "MLP finish!\n";
+
+
+            OCL_CHECK(errCode, errCode = clEnqueueTask(Command_Queue, K_residual[1], 1, &K_exe_event[4], &K_exe_event[5]), "HOST-Error: Failed to submit MLP residual for " + location);
+
+            clWaitForEvents(1, &K_exe_event[5]);
+
+            // Host event control and record
+            for (int i = 0; i < Nb_Of_Mem_Events; i++)
+            {
+                if (Mem_op_event[i] != nullptr)
+                {
+                    Profiling_Memory_Events.push_back(Mem_op_event[i]);
+                    Total_Memory_Events++;
+                }
+            }
+            Profiling_Kernel_Events.push_back(K_exe_event[0]);
+            Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_linear_layernorm_qkv");
+            for (int h = 0; h < NUM_HEADS; h++)
+            {
+                Profiling_Kernel_Events.push_back(A_exe_event[h]);
+                Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_attention_head_" + to_string(h));
+            }
+            Profiling_Kernel_Events.push_back(K_exe_event[1]);
+            Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_projection_out");
+            Profiling_Kernel_Events.push_back(K_exe_event[2]);
+            Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_attention_residual");
+            Profiling_Kernel_Events.push_back(K_exe_event[3]);
+            Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_layernorm_1");
+            Profiling_Kernel_Events.push_back(K_exe_event[4]);
+            Profiling_Kernel_Names.push_back("encoderblock_" + to_string(block) + "_mlp_residual");
+            Total_Kernel_Events += Nb_Of_Exe_Events;
+        } // Frame loop
+
+        clFinish(Command_Queue);
+
+        for (int frame = 0; frame < FRAME; frame++)
+        {
+            for (int h = 0; h < NUM_HEADS; h++)
+            {
+                int idx = frame * NUM_HEADS + h;
+                clReleaseMemObject(GlobMem_BUF_head_Q[idx]);
+                clReleaseMemObject(GlobMem_BUF_head_K[idx]);
+                clReleaseMemObject(GlobMem_BUF_head_V[idx]);
+                clReleaseMemObject(GlobMem_BUF_head_Out[idx]);
+            }
+        }
+    } // block loop
+
+    cout << endl
+         << "HOST_Info: Waiting for application to be completed ..." << endl;
+    clFinish(Command_Queue);
+
+    cl_event final_output_read_event = nullptr;
+    errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_X,
+                                         CL_MIGRATE_MEM_OBJECT_HOST, 0, NULL, &final_output_read_event);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to copy final spatial encoder output to host" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    clWaitForEvents(1, &final_output_read_event);
+
+    auto Host_Post_End = chrono::high_resolution_clock::now();
+    Host_Post_Time_ms += chrono::duration<double, std::milli>(Host_Post_End - Host_Post_Start).count();
+
+
+// ============================================================================
+// Step 6: Processing Output Results
+//         o) Store spatial encoder output results to a file
+// ============================================================================
+#ifdef ALL_MESSAGES
+    cout << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 6) Store and Check the Output Results                   " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+#endif
+
+    // ------------------------------------------------------
+    // Step 6.1: Store output Result to the spatial encoder output file
+    // ------------------------------------------------------
+    char Output_File_Name[] = "spatial_encoder_output.txt";
+    cout << "HOST_Info: Store output results in: " << Output_File_Name << endl;
+
+    fstream Output_File;
+    Output_File.open(Output_File_Name, ios::out);
+    if (!Output_File.is_open())
+    {
+        cout << endl
+             << "HOST-Error: Failed to open the " << Output_File_Name << " file for write" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    for (int f = 0; f < FRAME; f++)
+    {
+        for (int i = 0; i < SEQ_LEN; i++)
+        {
+            for (int d = 0; d < EMBED_DIM; d++)
+            {
+                // Output_File << Spatial_Encoder_Output[i][d] << " ";
+                Output_File << X[f * SEQ_LEN + i][d] << " ";
+            }
+            Output_File << endl;
+        }
+    }
+    Output_File.close();
+    cout << "HOST-Info: Host post-processing time (concat + residual + MLP) = "
+         << Host_Post_Time_ms << " ms" << endl;
+    // ============================================================================
+    // Step 7: Custom Profiling
+    // ============================================================================
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 7) Custom Profiling                                     " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+    int Nb_Of_Kernels = static_cast<int>(Profiling_Kernel_Events.size());
+    int Nb_Of_Memory_Tranfers = static_cast<int>(Profiling_Memory_Events.size());
+    if (Nb_Of_Kernels > 0 && Nb_Of_Memory_Tranfers > 0)
+    {
+        run_custom_profiling(
+            Nb_Of_Kernels,
+            Nb_Of_Memory_Tranfers,
+            Profiling_Kernel_Events.data(),
+            Profiling_Memory_Events.data(),
+            Profiling_Kernel_Names.data());
+    }
+
+    // ============================================================================
+    // Step 8: Release Allocated Resources
+    // ============================================================================
+    clReleaseDevice(Target_Device_ID); // Only available in OpenCL >= 1.2
+
+    for (cl_event evt : Profiling_Memory_Events)
+        clReleaseEvent(evt);
+    for (cl_event evt : Profiling_Kernel_Events)
+        clReleaseEvent(evt);
+    clReleaseEvent(final_output_read_event);
+
+    for (int f = 0; f < FRAME; f++)
+    {
+        clReleaseMemObject(GlobMem_BUF_frame_X[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_X_norm[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_LayerNorm_Scaler[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_Q[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_K[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_V[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_Attention_Out[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_Attention_Projected[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_After_Attention_Residual_Float[f]);
+        clReleaseMemObject(GlobMem_BUF_frame_MLP_Output[f]);
+    }
+    clReleaseMemObject(GlobMem_BUF_X);
+    clReleaseMemObject(GlobMem_BUF_X_norm);
+    clReleaseMemObject(GlobMem_BUF_Attention_Out);
+    clReleaseMemObject(GlobMem_BUF_Attention_Projected);
+    clReleaseMemObject(GlobMem_BUF_After_Attention_Residual_Float);
+
+    clReleaseMemObject(GlobMem_BUF_LayerNorm_Gamma);
+    clReleaseMemObject(GlobMem_BUF_LayerNorm_Beta);
+    clReleaseMemObject(GlobMem_BUF_LayerNorm_Scaler);
+
+    clReleaseMemObject(GlobMem_BUF_Wq);
+    clReleaseMemObject(GlobMem_BUF_bq);
+    clReleaseMemObject(GlobMem_BUF_scale_wq);
+    clReleaseMemObject(GlobMem_BUF_Wk);
+    clReleaseMemObject(GlobMem_BUF_bk);
+    clReleaseMemObject(GlobMem_BUF_scale_wk);
+    clReleaseMemObject(GlobMem_BUF_Wv);
+    clReleaseMemObject(GlobMem_BUF_bv);
+    clReleaseMemObject(GlobMem_BUF_scale_wv);
+    clReleaseMemObject(GlobMem_BUF_Wout);
+    clReleaseMemObject(GlobMem_BUF_bout);
+    clReleaseMemObject(GlobMem_BUF_scale_wout);
+    clReleaseMemObject(GlobMem_BUF_MLP_Output);
+    clReleaseMemObject(GlobMem_BUF_MLP_W1);
+    clReleaseMemObject(GlobMem_BUF_MLP_W2);
+    clReleaseMemObject(GlobMem_BUF_MLP_b1);
+    clReleaseMemObject(GlobMem_BUF_MLP_b2);
+    clReleaseMemObject(GlobMem_BUF_MLP_scale_w1);
+    clReleaseMemObject(GlobMem_BUF_MLP_scale_w2);
+    clReleaseMemObject(GlobMem_BUF_Q);
+    clReleaseMemObject(GlobMem_BUF_K);
+    clReleaseMemObject(GlobMem_BUF_V);
+
+    
+    clReleaseKernel(K_layernorm);
+    clReleaseKernel(K_linear_qkv_multihead);
+    for (int h = 0; h < NUM_HEADS; h++)
+        clReleaseKernel(K_attention_opt[h]);
+    clReleaseKernel(K_projection_out);
+    clReleaseKernel(K_residual[0]);
+    clReleaseKernel(K_residual[1]);
+    clReleaseKernel(K_mlp_q);
+
+    clReleaseProgram(Program);
+    clReleaseCommandQueue(Command_Queue);
+    clReleaseContext(Context);
+
+    free(Platform_IDs);
+    free(Device_IDs);
+    free(X);
+    free(LayerNorm_gamma);
+    free(LayerNorm_beta);
+    free(X_norm);
+    free(LayerNorm_scaler);
+    free(Wq);
+    free(Wq_Linear_Packed);
+    free(bq);
+    free(scale_wq);
+    free(Wk);
+    free(Wk_Linear_Packed);
+    free(bk);
+    free(scale_wk);
+    free(Wv);
+    free(Wv_Linear_Packed);
+    free(bv);
+    free(scale_wv);
+    free(Wout);
+    free(bout);
+    free(scale_wout);
+    free(LayerNorm1_gamma);
+    free(LayerNorm1_beta);
+    free(Q);
+    free(K_out);
+    free(V);
+    free(Attention_Out);
+    free(Attention_Concat);
+    free(Attention_Projected);
+    free(After_Attention_Residual_Float);
+    free(MLP_Output_Packed);
+    free(MLP_W1_Packed);
+    free(MLP_W2_Packed);
+    free(MLP_W1);
+    free(MLP_b1);
+    free(MLP_scale_w1);
+    free(MLP_W2);
+    free(MLP_b2);
+    free(MLP_scale_w2);
+    free(xclbin_Memory);
+
+    cout << endl
+         << "HOST-Info: DONE" << endl
+         << endl;
+
+    return EXIT_SUCCESS;
+}

@@ -417,6 +417,7 @@ posembedding
 temportal encoder's layernorm
  =================================================================== */
 
+/*
  void temporal_layernorm(
     float in[TEMP_LEN][EMBED_DIM],
     float kernel[EMBED_DIM],
@@ -546,3 +547,4 @@ void temporal_posEmbd(
     }
     return ;
 }
+*/
