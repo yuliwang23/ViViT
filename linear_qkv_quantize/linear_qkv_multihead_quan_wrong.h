@@ -13,6 +13,7 @@
 #include "hls_stream.h"
 #include "ap_int.h"
 #include "ap_fixed.h"
+#include "../vivit_config.h"
 
 constexpr int SEQ_LEN = 14 * 14 + 1; // 14*14*16 --> per frame // 14*15
 constexpr int EMBED_DIM = 768;
@@ -185,12 +186,12 @@ void store_result_FIFO2HBM(
 // ============================================================
 // Constants
 // ============================================================
-constexpr int SEQ_LEN   = 14 * 14 + 1;         // 197
-constexpr int EMBED_DIM = 768;
-constexpr int NUM_HEADS = 12;
-constexpr int HEAD_DIM  = EMBED_DIM / NUM_HEADS; // 64
-constexpr int TILE_SIZE = 64;
-constexpr int DSP_PER_CYCLE = 16;
+constexpr int SEQ_LEN   = VIVIT_SEQ_LEN;
+constexpr int EMBED_DIM = VIVIT_EMBED_DIM;
+constexpr int NUM_HEADS = VIVIT_NUM_HEADS;
+constexpr int HEAD_DIM  = VIVIT_HEAD_DIM;
+constexpr int TILE_SIZE = VIVIT_LINEAR_TILE_SIZE;
+constexpr int DSP_PER_CYCLE = VIVIT_DSP_PER_CYCLE;
 
 // Derived constants (used for FIFO depth calculation)
 // Per j_tile iteration:

@@ -8,13 +8,14 @@
 #include <ap_int.h>
 #include <hls_stream.h>
 #include <cmath>
+#include "../vivit_config.h"
 
 // Constants for Vision Transformer (ViT)
-constexpr int SEQ_LEN = 197; 
-constexpr int EMBED_DIM = 768;
-constexpr int MLP_DIM = 3072;
-constexpr int NUM_HEADS = 12;
-constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS;
+constexpr int SEQ_LEN = VIVIT_SEQ_LEN;
+constexpr int EMBED_DIM = VIVIT_EMBED_DIM;
+constexpr int MLP_DIM = VIVIT_MLP_DIM;
+constexpr int NUM_HEADS = VIVIT_NUM_HEADS;
+constexpr int HEAD_DIM = VIVIT_HEAD_DIM;
 constexpr int VEC_MAX = SEQ_LEN;
 
 // Data type for 256-bit memory bus

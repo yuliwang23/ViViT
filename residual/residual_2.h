@@ -4,15 +4,16 @@
 #include "hls_stream.h"
 #include "ap_int.h"
 #include "ap_fixed.h"
+#include "../vivit_config.h"
 
 // ============================================================
 // Design parameters
 // ============================================================
-constexpr int SEQ_LEN   = 14 * 14 + 1;          // 197
-constexpr int EMBED_DIM = 768;
-constexpr int NUM_HEADS = 12;
-constexpr int HEAD_DIM  = EMBED_DIM / NUM_HEADS; // 64
-constexpr int TILE_SIZE = 64;                    // == HEAD_DIM
+constexpr int SEQ_LEN   = VIVIT_SEQ_LEN;
+constexpr int EMBED_DIM = VIVIT_EMBED_DIM;
+constexpr int NUM_HEADS = VIVIT_NUM_HEADS;
+constexpr int HEAD_DIM  = VIVIT_HEAD_DIM;
+constexpr int TILE_SIZE = VIVIT_LINEAR_TILE_SIZE;
 
 typedef ap_uint<256> bus_t; // 256 / 32 = 8 floats
 
@@ -24,5 +25,4 @@ void residual(
     bus_t* C);
 }
 #endif
-
 

@@ -1,11 +1,13 @@
 #ifndef MLP_H
 #define MLP_H
 
+#include "../vivit_config.h"
+
 // Max dimensions (compile-time constants for HLS)
-#define SEQ_MAX 64
-#define IN_DIM_MAX 768
-#define HIDDEN_DIM_MAX 3072
-#define OUT_DIM_MAX 768
+#define SEQ_MAX VIVIT_SEQ_LEN
+#define IN_DIM_MAX VIVIT_EMBED_DIM
+#define HIDDEN_DIM_MAX VIVIT_MLP_DIM
+#define OUT_DIM_MAX VIVIT_EMBED_DIM
 
 void mlp_forward(
     float input[SEQ_MAX][IN_DIM_MAX],

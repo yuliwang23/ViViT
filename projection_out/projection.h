@@ -3,13 +3,14 @@
 
 #include <cmath>
 #include <stdint.h>
+#include "../vivit_config.h"
 
-constexpr int SEQ_LEN = 14 * 14 + 1; // 197
-constexpr int EMBED_DIM = 768;
-constexpr int NUM_HEADS = 12;
-constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS; // 64
-constexpr int OUT_TILE = 64;
-constexpr int DOT_UNROLL = 16;
+constexpr int SEQ_LEN = VIVIT_SEQ_LEN;
+constexpr int EMBED_DIM = VIVIT_EMBED_DIM;
+constexpr int NUM_HEADS = VIVIT_NUM_HEADS;
+constexpr int HEAD_DIM = VIVIT_HEAD_DIM;
+constexpr int OUT_TILE = VIVIT_OUT_TILE;
+constexpr int DOT_UNROLL = VIVIT_DOT_UNROLL;
 constexpr int PACK_FACTOR = 8;
 constexpr int EMBED_DIM_PACKED = EMBED_DIM / PACK_FACTOR;
 constexpr int PACKS_PER_DOT = DOT_UNROLL / PACK_FACTOR;

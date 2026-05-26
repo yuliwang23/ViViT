@@ -16,9 +16,9 @@ void residual(
     bus_t* B,
     bus_t* C)
 {
-#pragma HLS INTERFACE m_axi port=A offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=18912 // depth: 傳輸這個陣列的記憶體深度
-#pragma HLS INTERFACE m_axi port=B offset=slave bundle=gmem1 max_widen_bitwidth=256 depth=18912 // 197 * 96 (96 = 768 / 8)
-#pragma HLS INTERFACE m_axi port=C offset=slave bundle=gmem2 max_widen_bitwidth=256 depth=18912 // 想乘傳幾次
+#pragma HLS INTERFACE m_axi port=A offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=VIVIT_EMBED_FP_PACKED_DEPTH
+#pragma HLS INTERFACE m_axi port=B offset=slave bundle=gmem1 max_widen_bitwidth=256 depth=VIVIT_EMBED_FP_PACKED_DEPTH
+#pragma HLS INTERFACE m_axi port=C offset=slave bundle=gmem2 max_widen_bitwidth=256 depth=VIVIT_EMBED_FP_PACKED_DEPTH
 
 #pragma HLS INTERFACE s_axilite port=A bundle=control
 #pragma HLS INTERFACE s_axilite port=B bundle=control

@@ -11,9 +11,9 @@ void residual(
     bus_dt B[SEQ_LEN][PER_ROW],
     bus_dt C[SEQ_LEN][PER_ROW])
 {
-#pragma HLS INTERFACE m_axi port=A offset=slave bundle=gmem0 depth=18912
-#pragma HLS INTERFACE m_axi port=B offset=slave bundle=gmem1 depth=18912
-#pragma HLS INTERFACE m_axi port=C offset=slave bundle=gmem2 depth=18912
+#pragma HLS INTERFACE m_axi port=A offset=slave bundle=gmem0 depth=VIVIT_EMBED_FP_PACKED_DEPTH
+#pragma HLS INTERFACE m_axi port=B offset=slave bundle=gmem1 depth=VIVIT_EMBED_FP_PACKED_DEPTH
+#pragma HLS INTERFACE m_axi port=C offset=slave bundle=gmem2 depth=VIVIT_EMBED_FP_PACKED_DEPTH
 
 #pragma HLS INTERFACE s_axilite port=A bundle=control
 #pragma HLS INTERFACE s_axilite port=B bundle=control
@@ -38,7 +38,7 @@ void residual(
 
     for (int token = 0; token < SEQ_LEN; token++)
     {
-#pragma HLS LOOP_TRIPCOUNT min=197 max=197
+#pragma HLS LOOP_TRIPCOUNT min=VIVIT_SEQ_LEN max=VIVIT_SEQ_LEN
 
         // =================================================
         // load from HBM

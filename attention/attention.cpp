@@ -83,7 +83,7 @@ void load_tile_HBM2FIFO(
     bool last_tile
 ){
     #pragma HLS INLINE off
-    int valid_tokens = last_tile ? 5 : tile_size; 
+    int valid_tokens = last_tile ? (SEQ_LEN - (num_tiles - 1) * tile_size) : tile_size;
     int padding_tokens = tile_size - valid_tokens;
     int valid_chunks = valid_tokens * (HEAD_DIM / 8);
     int padding_chunks = padding_tokens * (HEAD_DIM / 8);
@@ -150,7 +150,7 @@ void compute_score(
                 }
                 sum += local_sum;
             }
-            float score = sum * 0.125f;
+            float score = sum * scale;
             FIFO_score.write(score);
         }
     }
@@ -193,7 +193,7 @@ void compute_softmax(
         compute_max_loop:
         for(int j = 0; j < tile_size; j++) {
             #pragma HLS PIPELINE II=1
-            if(last_tile && j >=5){
+            if(last_tile && j >= (SEQ_LEN - (num_tiles - 1) * tile_size)){
                 BRAM_score[i][j] = m_tmp;
             }else{
                 float s = BRAM_score[i][j];
@@ -215,7 +215,7 @@ void compute_softmax(
             l_tmp += local_l_tmp_sum;
         }
         if(last_tile){
-            l_tmp -= 11.0f;
+            l_tmp -= static_cast<float>(tile_size - (SEQ_LEN - (num_tiles - 1) * tile_size));
         }
         FIFO_l.write(l_tmp);
         send_P_loop:
@@ -309,7 +309,7 @@ void store_tile_FIFO2HBM(
     bool last_tile_Q 
 ){
     #pragma HLS INLINE off
-    int valid_tokens = last_tile_Q ? 5 : tile_size; 
+    int valid_tokens = last_tile_Q ? (SEQ_LEN - (num_tiles - 1) * tile_size) : tile_size;
     int valid_chunks = valid_tokens * (HEAD_DIM / 8);
     int total_chunks_in_fifo = tile_size * (HEAD_DIM / 8);
 

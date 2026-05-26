@@ -2,23 +2,24 @@
 #include "hls_stream.h"
 #include "ap_int.h"
 #include "ap_fixed.h"
+#include "../vivit_config.h"
 
 // ============================================================
 // Design parameters
 // ============================================================
-constexpr int SEQ_LEN   = 14 * 14 + 1;          // 197
-constexpr int EMBED_DIM = 768;
-constexpr int NUM_HEADS = 12;
-constexpr int HEAD_DIM  = EMBED_DIM / NUM_HEADS; // 64
-constexpr int TILE_SIZE = 64;                    // == HEAD_DIM
+constexpr int SEQ_LEN   = VIVIT_SEQ_LEN;
+constexpr int EMBED_DIM = VIVIT_EMBED_DIM;
+constexpr int NUM_HEADS = VIVIT_NUM_HEADS;
+constexpr int HEAD_DIM  = VIVIT_HEAD_DIM;
+constexpr int TILE_SIZE = VIVIT_LINEAR_TILE_SIZE;
 
 // FIFO depth constants (also defined in .cpp, kept here for reference)
 // FIFO_W_DEPTH   = (EMBED_DIM/TILE_SIZE) * TILE_SIZE * (TILE_SIZE/32)
 //                = 12 * 64 * 2 = 1536
 // FIFO_OUT_DEPTH = SEQ_LEN * (TILE_SIZE/8)
 //                = 197 * 8 = 1576
-#define FIFO_W_DEPTH   1536
-#define FIFO_OUT_DEPTH 1576
+#define FIFO_W_DEPTH   ((EMBED_DIM / TILE_SIZE) * TILE_SIZE * (TILE_SIZE / 32))
+#define FIFO_OUT_DEPTH (SEQ_LEN * (TILE_SIZE / 8))
 
 typedef ap_uint<256> uint256_dt;
 

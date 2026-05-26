@@ -18,29 +18,29 @@ void linear_qkv_multihead(
     uint256_dt *V)
 {
     // Group 1: Native 256-bit Input Feature Map & LayerNorm Weights
-    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_x     depth=18912 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_x     depth=96    max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_x     depth=96    max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_x     depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_x     depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_x     depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
     
     // Group 2: Native 32-bit Floating-Point Vectors (Separated to avoid wrapc struct alignment crash)
-    #pragma HLS INTERFACE m_axi port=bq       offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=bk       offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=bv       offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=scale_wq offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=scale_wk offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=scale_wv offset=slave bundle=gmem_bias  depth=768
+    #pragma HLS INTERFACE m_axi port=bq       offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=bk       offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=bv       offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=scale_wq offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=scale_wk offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=scale_wv offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
 
     // Group 3: Q-Stream Weights & Outputs (Matched 256-bit width)
-    #pragma HLS INTERFACE m_axi port=Wq       offset=slave bundle=gmem_q     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=Q        offset=slave bundle=gmem_q     depth=18912 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wq       offset=slave bundle=gmem_q     depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Q        offset=slave bundle=gmem_q     depth=VIVIT_QKV_FP_PACKED_DEPTH max_widen_bitwidth=256
     
     // Group 4: K-Stream Weights & Outputs (Matched 256-bit width)
-    #pragma HLS INTERFACE m_axi port=Wk       offset=slave bundle=gmem_k     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=K        offset=slave bundle=gmem_k     depth=18912 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wk       offset=slave bundle=gmem_k     depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=K        offset=slave bundle=gmem_k     depth=VIVIT_QKV_FP_PACKED_DEPTH max_widen_bitwidth=256
     
     // Group 5: V-Stream Weights & Outputs (Matched 256-bit width)
-    #pragma HLS INTERFACE m_axi port=Wv       offset=slave bundle=gmem_v     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=V        offset=slave bundle=gmem_v     depth=18912 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wv       offset=slave bundle=gmem_v     depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=V        offset=slave bundle=gmem_v     depth=VIVIT_QKV_FP_PACKED_DEPTH max_widen_bitwidth=256
 
     // S_AXILite Control Register Interfaces
     #pragma HLS INTERFACE s_axilite port=x        bundle=control

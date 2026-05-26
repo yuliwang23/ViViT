@@ -8,16 +8,17 @@
 #include <hls_stream.h>
 #include <hls_math.h>
 #include <cmath>
+#include "../vivit_config.h"
 // #define MAX(a, b) ((a) > (b) ? (a) : (b))
 typedef ap_uint<256> uint256_dt;
-constexpr int SEQ_LEN = 14 * 14 + 1; // 14*14*16
-constexpr int EMBED_DIM = 768;
-constexpr int NUM_HEADS = 12;
-constexpr int HEAD_DIM = EMBED_DIM / NUM_HEADS;
-constexpr float scale = 0.125; // for Base param. (FE_B_HEAD_DIM = 64)
+constexpr int SEQ_LEN = VIVIT_SEQ_LEN;
+constexpr int EMBED_DIM = VIVIT_EMBED_DIM;
+constexpr int NUM_HEADS = VIVIT_NUM_HEADS;
+constexpr int HEAD_DIM = VIVIT_HEAD_DIM;
+constexpr float scale = VIVIT_ATTENTION_SCALE;
 constexpr int VEC_MAX = SEQ_LEN;
-constexpr int tile_size = 16; 
-constexpr int num_tiles = 13;
+constexpr int tile_size = VIVIT_ATTENTION_TILE_SIZE;
+constexpr int num_tiles = VIVIT_ATTENTION_NUM_TILES;
 
 extern "C" void attention_opt(
     float Q[SEQ_LEN][HEAD_DIM],

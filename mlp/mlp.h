@@ -6,6 +6,7 @@
 #include <hls_stream.h>
 #include <hls_math.h>
 #include <cstdint>
+#include "../vivit_config.h"
 
 typedef ap_uint<256> uint256_dt; // 8 x float32  OR  32 x int8
 typedef ap_int<64> int64_dt;     // 8 x int8 packed
@@ -13,9 +14,9 @@ typedef ap_int<8> int8_dt;
 typedef ap_int<26> int26_dt; // matmul accumulator (int8*int8 sum)
 typedef ap_int<32> int32_dt;
 
-#define SEQ_LEN 64
-#define EMBED_DIM 768   // = IN_DIM = OUT_DIM
-#define HIDDEN_DIM 3072 // 4 * EMBED_DIM (standard GPT MLP)
+#define SEQ_LEN VIVIT_SEQ_LEN
+#define EMBED_DIM VIVIT_EMBED_DIM   // = IN_DIM = OUT_DIM
+#define HIDDEN_DIM VIVIT_MLP_DIM // 4 * EMBED_DIM (standard GPT MLP)
 
 #define EMBED_DIM_package (EMBED_DIM / 8)   // 96   (each = 8 int8)
 #define HIDDEN_DIM_package (HIDDEN_DIM / 8) // 384

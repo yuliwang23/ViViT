@@ -7,9 +7,10 @@
 
 #include <ap_int.h>
 #include <stdint.h>
+#include "../vivit_config.h"
 
-constexpr int SEQ_LEN   = 14 * 14 + 1;   // 197
-constexpr int EMBED_DIM = 768;
+constexpr int SEQ_LEN   = VIVIT_SEQ_LEN;
+constexpr int EMBED_DIM = VIVIT_EMBED_DIM;
 
 constexpr int VEC_SIZE = 8;              // 256 / 32
 constexpr int PER_ROW  = EMBED_DIM / VEC_SIZE;

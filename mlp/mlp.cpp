@@ -26,15 +26,15 @@ void mlp_q(
 // These depths are needed for cosim to allocate the correct AXI
 // memory model size, otherwise the testbench writes past the end
 // and SIGSEGVs inside CALL_C_DUT.
-#pragma HLS INTERFACE m_axi port=input    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=4728
-#pragma HLS INTERFACE m_axi port=input_scaler offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=197
-#pragma HLS INTERFACE m_axi port=output   offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=18912
-#pragma HLS INTERFACE m_axi port=W1       offset=slave bundle=gmem1 max_widen_bitwidth=256 depth=73728
-#pragma HLS INTERFACE m_axi port=W2       offset=slave bundle=gmem2 max_widen_bitwidth=256 depth=73728
-#pragma HLS INTERFACE m_axi port=b1       offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=3072
-#pragma HLS INTERFACE m_axi port=b2       offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=768
-#pragma HLS INTERFACE m_axi port=scale_w1 offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=3072
-#pragma HLS INTERFACE m_axi port=scale_w2 offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=768
+#pragma HLS INTERFACE m_axi port=input    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=VIVIT_EMBED_INT8_PACKED_DEPTH
+#pragma HLS INTERFACE m_axi port=input_scaler offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=VIVIT_SEQ_LEN
+#pragma HLS INTERFACE m_axi port=output   offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=VIVIT_EMBED_FP_PACKED_DEPTH
+#pragma HLS INTERFACE m_axi port=W1       offset=slave bundle=gmem1 max_widen_bitwidth=256 depth=VIVIT_MLP_WEIGHT_INT8_PACKED_DEPTH
+#pragma HLS INTERFACE m_axi port=W2       offset=slave bundle=gmem2 max_widen_bitwidth=256 depth=VIVIT_MLP_WEIGHT_INT8_PACKED_DEPTH
+#pragma HLS INTERFACE m_axi port=b1       offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=VIVIT_MLP_DIM
+#pragma HLS INTERFACE m_axi port=b2       offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=VIVIT_EMBED_DIM
+#pragma HLS INTERFACE m_axi port=scale_w1 offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=VIVIT_MLP_DIM
+#pragma HLS INTERFACE m_axi port=scale_w2 offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=VIVIT_EMBED_DIM
 
 #pragma HLS INTERFACE s_axilite port=input    bundle=control
 #pragma HLS INTERFACE s_axilite port=input_scaler bundle=control

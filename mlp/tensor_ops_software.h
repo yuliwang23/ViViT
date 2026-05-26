@@ -1,10 +1,12 @@
 #ifndef TENSOR_OPS_H
 #define TENSOR_OPS_H
 
-#define M_MAX 256
-#define N_MAX 256
-#define K_MAX 256
-#define VEC_MAX 256
+#include "../vivit_config.h"
+
+#define M_MAX VIVIT_MLP_DIM
+#define N_MAX VIVIT_MLP_DIM
+#define K_MAX VIVIT_MLP_DIM
+#define VEC_MAX VIVIT_MLP_DIM
 
 #include <math.h>
 
