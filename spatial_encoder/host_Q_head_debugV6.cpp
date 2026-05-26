@@ -49,17 +49,43 @@ using namespace std;
 
 #include <CL/cl.h>
 #include "help_functions.h"
+#include "host.h"
 #include "layer.h"
 #include "utility.h"
-// #include "host.h"
 
 #define ALL_MESSAGES
 
-constexpr int MLP_KERNEL_SEQ_LEN = 64;
+constexpr int MLP_KERNEL_SEQ_LEN = SEQ_LEN;
 constexpr int MLP_CHUNK_U32 = 8;
 constexpr int MLP_OUTPUT_CHUNKS = (SEQ_LEN * EMBED_DIM) / MLP_CHUNK_U32;
 constexpr int MLP_W1_CHUNKS = (MLP_DIM * EMBED_DIM) / 32;
 constexpr int MLP_W2_CHUNKS = (EMBED_DIM * MLP_DIM) / 32;
+
+static string join_path(const string &dir, const string &name)
+{
+    if (dir.empty())
+        return name;
+    const char last = dir[dir.size() - 1];
+    if (last == '/' || last == '\\')
+        return dir + name;
+    return dir + "/" + name;
+}
+
+static bool path_exists(const string &path)
+{
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
+}
+
+static string first_existing_path(const vector<string> &candidates)
+{
+    for (const string &path : candidates)
+    {
+        if (path_exists(path))
+            return path;
+    }
+    return candidates.empty() ? string() : candidates[0];
+}
 
 // -----------------------------host side helper functions--------------------------------------
 // TODO: modify to load weight from quantized model
@@ -713,17 +739,19 @@ int main(int argc, char *argv[])
 //    o) argv[2] Device Name
 //    o) argv[3] XCLBIN file
 // ============================================================================
-// INFO: sample usage: ./host Xilinx xilinx_u280_xdma_201920_3 spatial_encoder.xclbin
+// INFO: sample usage:
+//   ./host Xilinx xilinx_u280_xdma_201920_3 spatial_encoder.xclbin
+//   ./host Xilinx xilinx_u280_xdma_201920_3 spatial_encoder.xclbin ../params/all_params/SpatialTransformer ../params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt
 #ifdef ALL_MESSAGES
     cout << "HOST-Info: ============================================================= " << endl;
     cout << "HOST-Info: (Step 1) Check Command Line Arguments                      " << endl;
     cout << "HOST-Info: ============================================================= " << endl;
 #endif
 
-    if (argc != 4)
+    if (argc < 4 || argc > 6)
     {
         cout << "HOST-Error: Incorrect command line syntax " << endl;
-        cout << "HOST-Info:  Usage: " << argv[0] << " <Platform_Vendor> <Device_Name> <XCLBIN_File>  <Test Vectors Size>" << endl
+        cout << "HOST-Info:  Usage: " << argv[0] << " <Platform_Vendor> <Device_Name> <XCLBIN_File> [SpatialTransformer_Params_Dir] [Input_X_File]" << endl
              << endl;
         return EXIT_FAILURE;
     }
@@ -731,9 +759,38 @@ int main(int argc, char *argv[])
     const char *Target_Platform_Vendor = argv[1];
     const char *Target_Device_Name = argv[2];
     const char *xclbinFilename = argv[3];
+    const string spatial_params_root = (argc >= 5)
+        ? string(argv[4])
+        : first_existing_path({
+              "../params/all_params/SpatialTransformer",
+              "ViViT/params/all_params/SpatialTransformer",
+              "params/all_params/SpatialTransformer",
+              "/home/undergraduate/rjchen25/ViViT/params/all_params/SpatialTransformer",
+              "/home/undergraduate/rjchen25/ViViT/params/SpatialTransformer"});
+    const string x_input_file = (argc >= 6)
+        ? string(argv[5])
+        : first_existing_path({
+              "../params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
+              "ViViT/params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
+              "params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
+              "/home/undergraduate/rjchen25/ViViT/params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt"});
     cout << "HOST-Info: Platform_Vendor   : " << Target_Platform_Vendor << endl;
     cout << "HOST-Info: Device_Name       : " << Target_Device_Name << endl;
     cout << "HOST-Info: XCLBIN_file       : " << xclbinFilename << endl;
+    cout << "HOST-Info: Params_root       : " << spatial_params_root << endl;
+    cout << "HOST-Info: Input_X_file      : " << x_input_file << endl;
+    if (!path_exists(spatial_params_root))
+    {
+        cout << "HOST-Error: SpatialTransformer params directory does not exist: " << spatial_params_root << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    if (!path_exists(x_input_file))
+    {
+        cout << "HOST-Error: Input X file does not exist: " << x_input_file << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
 
     // ============================================================================
     // Step 2: Detect Target Platform and Target Device in a system.
@@ -1288,9 +1345,6 @@ int main(int argc, char *argv[])
     init_random_int(&MLP_W2[0][0], MLP_DIM * EMBED_DIM, -1, 1);
     init_random_int(MLP_b2, EMBED_DIM, -1, 1);
     */
-    // TODO: change input X file
-    const string x_input_file = "/home/undergraduate/rjchen25/ViViT/params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt";
-
     if (!load_txt_values_as_float(x_input_file, &X[0][0], FRAME * SEQ_LEN * EMBED_DIM))
     {
         cout << endl
@@ -1747,11 +1801,11 @@ int main(int argc, char *argv[])
     }
 
     // ============================================================================
-    // Step 5: Run 12 Spatial Transformer encoder blocks in sequence
+    // Step 5: Run configured Spatial Transformer encoder blocks in sequence
     // ============================================================================
 #ifdef ALL_MESSAGES
     cout << "HOST-Info: ============================================================= " << endl;
-    cout << "HOST-Info: (Step 5) Run 12 Spatial Encoder Blocks                        " << endl;
+    cout << "HOST-Info: (Step 5) Run " << NUM_ENCODER_BLOCKS << " Spatial Encoder Blocks" << endl;
     cout << "HOST-Info: ============================================================= " << endl;
 #endif
 
@@ -1802,32 +1856,32 @@ int main(int argc, char *argv[])
         memset(Mem_op_event, 0, sizeof(Mem_op_event));
         memset(K_exe_event, 0, sizeof(K_exe_event));
         memset(A_exe_event, 0, sizeof(A_exe_event));
-        const string spatial_encoder_dir = "/home/undergraduate/rjchen25/ViViT/params/SpatialTransformer/encoderblock_" + to_string(block) + "/";
+        const string spatial_encoder_dir = join_path(spatial_params_root, "encoderblock_" + to_string(block));
         cout << "HOST-Info: Loading parameters for encoder block " << block << " from " << spatial_encoder_dir << endl;
 
         // loading weight per block
-        if (!load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_0_scale.txt", LayerNorm_gamma, EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_0_bias.txt", LayerNorm_beta, EMBED_DIM) ||
-            !load_txt_values_as_int8(spatial_encoder_dir + "MultiHeadDotProductAttention_0_query_kernel_qvalue.txt", &Wq[0][0], EMBED_DIM * EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_query_bias.txt", bq, EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_query_kernel_scale.txt", scale_wq, EMBED_DIM) ||
-            !load_txt_values_as_int8(spatial_encoder_dir + "MultiHeadDotProductAttention_0_key_kernel_qvalue.txt", &Wk[0][0], EMBED_DIM * EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_key_bias.txt", bk, EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_key_kernel_scale.txt", scale_wk, EMBED_DIM) ||
-            !load_txt_values_as_int8(spatial_encoder_dir + "MultiHeadDotProductAttention_0_value_kernel_qvalue.txt", &Wv[0][0], EMBED_DIM * EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_value_bias.txt", bv, EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_value_kernel_scale.txt", scale_wv, EMBED_DIM) ||
-            !load_txt_values_as_int8(spatial_encoder_dir + "MultiHeadDotProductAttention_0_out_kernel_qvalue.txt", &Wout[0][0], EMBED_DIM * EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_out_bias.txt", bout, EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MultiHeadDotProductAttention_0_out_kernel_scale.txt", scale_wout, EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_1_scale.txt", LayerNorm1_gamma, EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "LayerNorm_1_bias.txt", LayerNorm1_beta, EMBED_DIM) ||
-            !load_txt_values_as_int8(spatial_encoder_dir + "MlpBlock_0_Dense_0_kernel_qvalue.txt", &MLP_W1[0][0], EMBED_DIM * MLP_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_0_bias.txt", MLP_b1, MLP_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_0_kernel_scale.txt", MLP_scale_w1, MLP_DIM) ||
-            !load_txt_values_as_int8(spatial_encoder_dir + "MlpBlock_0_Dense_1_kernel_qvalue.txt", &MLP_W2[0][0], MLP_DIM * EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_1_bias.txt", MLP_b2, EMBED_DIM) ||
-            !load_txt_values_as_float(spatial_encoder_dir + "MlpBlock_0_Dense_1_kernel_scale.txt", MLP_scale_w2, EMBED_DIM))
+        if (!load_txt_values_as_float(join_path(spatial_encoder_dir, "LayerNorm_0_scale.txt"), LayerNorm_gamma, EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "LayerNorm_0_bias.txt"), LayerNorm_beta, EMBED_DIM) ||
+            !load_txt_values_as_int8(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_query_kernel_qvalue.txt"), &Wq[0][0], EMBED_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_query_bias.txt"), bq, EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_query_kernel_scale.txt"), scale_wq, EMBED_DIM) ||
+            !load_txt_values_as_int8(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_key_kernel_qvalue.txt"), &Wk[0][0], EMBED_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_key_bias.txt"), bk, EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_key_kernel_scale.txt"), scale_wk, EMBED_DIM) ||
+            !load_txt_values_as_int8(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_value_kernel_qvalue.txt"), &Wv[0][0], EMBED_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_value_bias.txt"), bv, EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_value_kernel_scale.txt"), scale_wv, EMBED_DIM) ||
+            !load_txt_values_as_int8(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_out_kernel_qvalue.txt"), &Wout[0][0], EMBED_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_out_bias.txt"), bout, EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MultiHeadDotProductAttention_0_out_kernel_scale.txt"), scale_wout, EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "LayerNorm_1_scale.txt"), LayerNorm1_gamma, EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "LayerNorm_1_bias.txt"), LayerNorm1_beta, EMBED_DIM) ||
+            !load_txt_values_as_int8(join_path(spatial_encoder_dir, "MlpBlock_0_Dense_0_kernel_qvalue.txt"), &MLP_W1[0][0], EMBED_DIM * MLP_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MlpBlock_0_Dense_0_bias.txt"), MLP_b1, MLP_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MlpBlock_0_Dense_0_kernel_scale.txt"), MLP_scale_w1, MLP_DIM) ||
+            !load_txt_values_as_int8(join_path(spatial_encoder_dir, "MlpBlock_0_Dense_1_kernel_qvalue.txt"), &MLP_W2[0][0], MLP_DIM * EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MlpBlock_0_Dense_1_bias.txt"), MLP_b2, EMBED_DIM) ||
+            !load_txt_values_as_float(join_path(spatial_encoder_dir, "MlpBlock_0_Dense_1_kernel_scale.txt"), MLP_scale_w2, EMBED_DIM))
         {
             cout << endl
                  << "HOST-Error: Failed to load one or more parameter files for encoder block " << block << endl
