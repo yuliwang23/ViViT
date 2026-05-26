@@ -115,6 +115,7 @@ posembedding
     MLP: quant->matmul->dequant->act. func->quant->matmul->dequant->act. func->residual
 temportal encoder's layernorm
  ====================================================== */
+ /*
 void temporal_layernorm(
     float in[TEMP_LEN][EMBED_DIM],
     float kernel[EMBED_DIM],
@@ -148,5 +149,5 @@ void temporal_posEmbd(
     float pos_embd[TEMP_LEN][EMBED_DIM],
     float out[TEMP_LEN][EMBED_DIM],
 );
-
+*/
 
