@@ -411,7 +411,7 @@ load_local_row:
     for (int i = 0; i < TILE_SIZE; i++)
     {
     load_local_col:
-        for (int j = 0; j < 24; j++)
+        for (int j = 0; j < EMBED_DIM_package / 4; j++)
         {
 #pragma HLS PIPELINE II = 4
 

@@ -50,10 +50,11 @@ using namespace std;
 #include <CL/cl.h>
 #include "help_functions.h"
 #include "host.h"
-#include "layer.h"
+// #include "layer.h"
 #include "utility.h"
 
 #define ALL_MESSAGES
+#define HOST_DEBUG_SERIAL_STAGES 1
 
 constexpr int MLP_KERNEL_SEQ_LEN = SEQ_LEN;
 constexpr int MLP_CHUNK_U32 = 8;
@@ -85,6 +86,144 @@ static string first_existing_path(const vector<string> &candidates)
             return path;
     }
     return candidates.empty() ? string() : candidates[0];
+}
+
+static const char *event_status_name(cl_int status)
+{
+    switch (status)
+    {
+    case CL_QUEUED:
+        return "QUEUED";
+    case CL_SUBMITTED:
+        return "SUBMITTED";
+    case CL_RUNNING:
+        return "RUNNING";
+    case CL_COMPLETE:
+        return "COMPLETE";
+    default:
+        return "ERROR";
+    }
+}
+
+static void debug_event_log(const string &message)
+{
+    cout << "[HOST-EVENT] " << message << endl;
+    cout.flush();
+}
+
+static void debug_event_status(const string &label, cl_event event)
+{
+    cout << "[HOST-EVENT] " << label << " status: ";
+    if (event == nullptr)
+    {
+        cout << "NULL" << endl;
+        cout.flush();
+        return;
+    }
+
+    cl_int status = 0;
+    cl_int err = clGetEventInfo(event, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(status), &status, NULL);
+    if (err != CL_SUCCESS)
+    {
+        cout << "clGetEventInfo ERROR " << err << endl;
+    }
+    else
+    {
+        cout << event_status_name(status) << " (" << status << ")" << endl;
+    }
+    cout.flush();
+}
+
+static void debug_event_wait_list(const string &label, cl_uint count, const cl_event *events)
+{
+    debug_event_log(label + " wait list count=" + to_string(count));
+    for (cl_uint i = 0; i < count; i++)
+    {
+        debug_event_status(label + " wait[" + to_string(i) + "]", events[i]);
+    }
+}
+
+static void debug_float_tensor_stats(const string &label, const float *data, size_t count)
+{
+    size_t nan_count = 0;
+    size_t inf_count = 0;
+    size_t finite_count = 0;
+    float min_val = 0.0f;
+    float max_val = 0.0f;
+    float max_abs = 0.0f;
+    size_t min_index = 0;
+    size_t max_index = 0;
+    size_t max_abs_index = 0;
+
+    for (size_t i = 0; i < count; i++)
+    {
+        const float value = data[i];
+        if (std::isnan(value))
+        {
+            nan_count++;
+            continue;
+        }
+        if (std::isinf(value))
+        {
+            inf_count++;
+            continue;
+        }
+
+        if (finite_count == 0)
+        {
+            min_val = value;
+            max_val = value;
+            max_abs = std::fabs(value);
+            min_index = i;
+            max_index = i;
+            max_abs_index = i;
+        }
+        else
+        {
+            if (value < min_val)
+            {
+                min_val = value;
+                min_index = i;
+            }
+            if (value > max_val)
+            {
+                max_val = value;
+                max_index = i;
+            }
+            const float abs_value = std::fabs(value);
+            if (abs_value > max_abs)
+            {
+                max_abs = abs_value;
+                max_abs_index = i;
+            }
+        }
+        finite_count++;
+    }
+
+    cout << "[HOST-DATA] " << label
+         << " count=" << count
+         << " finite=" << finite_count
+         << " nan=" << nan_count
+         << " inf=" << inf_count;
+    if (finite_count > 0)
+    {
+        cout << " min=" << min_val
+             << " min_index=" << min_index
+             << " max=" << max_val
+             << " max_index=" << max_index
+             << " max_abs=" << max_abs
+             << " max_abs_index=" << max_abs_index;
+    }
+    cout << endl;
+
+    const size_t preview_count = (count < 8) ? count : 8;
+    cout << "[HOST-DATA] " << label << " first_values:";
+    for (size_t i = 0; i < preview_count; i++)
+    {
+        cout << " " << data[i];
+    }
+    cout << endl;
+    cout.flush();
 }
 
 // -----------------------------host side helper functions--------------------------------------
@@ -760,20 +899,18 @@ int main(int argc, char *argv[])
     const char *Target_Device_Name = argv[2];
     const char *xclbinFilename = argv[3];
     const string spatial_params_root = (argc >= 5)
-        ? string(argv[4])
-        : first_existing_path({
-              "../params/all_params/SpatialTransformer",
-              "ViViT/params/all_params/SpatialTransformer",
-              "params/all_params/SpatialTransformer",
-              "/home/undergraduate/rjchen25/ViViT/params/all_params/SpatialTransformer",
-              "/home/undergraduate/rjchen25/ViViT/params/SpatialTransformer"});
+                                           ? string(argv[4])
+                                           : first_existing_path({"../params/all_params/SpatialTransformer",
+                                                                  "ViViT/params/all_params/SpatialTransformer",
+                                                                  "params/all_params/SpatialTransformer",
+                                                                  "/home/undergraduate/rjchen25/ViViT/params/all_params/SpatialTransformer",
+                                                                  "/home/undergraduate/rjchen25/ViViT/params/SpatialTransformer"});
     const string x_input_file = (argc >= 6)
-        ? string(argv[5])
-        : first_existing_path({
-              "../params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
-              "ViViT/params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
-              "params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
-              "/home/undergraduate/rjchen25/ViViT/params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt"});
+                                    ? string(argv[5])
+                                    : first_existing_path({"../params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
+                                                           "ViViT/params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
+                                                           "params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt",
+                                                           "/home/undergraduate/rjchen25/ViViT/params/vivit_video_input_AfterConvAndEmbedding/sample_video_0_in.txt"});
     cout << "HOST-Info: Platform_Vendor   : " << Target_Platform_Vendor << endl;
     cout << "HOST-Info: Device_Name       : " << Target_Device_Name << endl;
     cout << "HOST-Info: XCLBIN_file       : " << xclbinFilename << endl;
@@ -1386,6 +1523,7 @@ int main(int argc, char *argv[])
         GlobMem_BUF_frame_After_Attention_Residual_Float[FRAME];
 
     cl_mem GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta,
+        GlobMem_BUF_LayerNorm1_Gamma, GlobMem_BUF_LayerNorm1_Beta,
         GlobMem_BUF_Wq, GlobMem_BUF_bq, GlobMem_BUF_scale_wq,
         GlobMem_BUF_Wk, GlobMem_BUF_bk, GlobMem_BUF_scale_wk,
         GlobMem_BUF_Wv, GlobMem_BUF_bv, GlobMem_BUF_scale_wv,
@@ -1646,6 +1784,23 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    GlobMem_BUF_LayerNorm1_Gamma = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), LayerNorm1_gamma, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to allocate GlobMem_BUF_LayerNorm1_Gamma" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+    GlobMem_BUF_LayerNorm1_Beta = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), LayerNorm1_beta, &errCode);
+    if (errCode != CL_SUCCESS)
+    {
+        cout << endl
+             << "Host-Error: Failed to allocate GlobMem_BUF_LayerNorm1_Beta" << endl
+             << endl;
+        return EXIT_FAILURE;
+    }
+
     GlobMem_BUF_Wq = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * EMBED_DIM * sizeof(int8_t), Wq_Linear_Packed, &errCode);
     if (errCode != CL_SUCCESS)
     {
@@ -1800,6 +1955,185 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    // Host-only debug: verify the layernorm CU inside the integrated xclbin
+    // can complete before it is connected to the full encoder pipeline.
+    {
+        debug_event_log("BEGIN integrated xclbin standalone LN self-test");
+        float (*ln_test_x)[EMBED_DIM] = reinterpret_cast<float (*)[EMBED_DIM]>(host_aligned_alloc(SEQ_LEN * EMBED_DIM * sizeof(float)));
+        float *ln_test_gamma = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+        float *ln_test_beta = reinterpret_cast<float *>(host_aligned_alloc(EMBED_DIM * sizeof(float)));
+        int8_t (*ln_test_out)[EMBED_DIM] = reinterpret_cast<int8_t (*)[EMBED_DIM]>(host_aligned_alloc(SEQ_LEN * EMBED_DIM * sizeof(int8_t)));
+        float *ln_test_scaler = reinterpret_cast<float *>(host_aligned_alloc(SEQ_LEN * sizeof(float)));
+
+        if (!ln_test_x || !ln_test_gamma || !ln_test_beta || !ln_test_out || !ln_test_scaler)
+        {
+            cout << endl
+                 << "HOST-Error: Out of Memory during integrated LN self-test allocation" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        for (int i = 0; i < SEQ_LEN; i++)
+        {
+            for (int d = 0; d < EMBED_DIM; d++)
+            {
+                ln_test_x[i][d] = 0.01f * static_cast<float>((d % 17) - 8) + 0.001f * static_cast<float>(i);
+                ln_test_out[i][d] = 0;
+            }
+            ln_test_scaler[i] = 0.0f;
+        }
+        for (int d = 0; d < EMBED_DIM; d++)
+        {
+            ln_test_gamma[d] = 1.0f;
+            ln_test_beta[d] = 0.0f;
+        }
+
+        cl_mem ln_test_buf_x = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
+                                              SEQ_LEN * EMBED_DIM * sizeof(float), ln_test_x, &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to allocate ln_test_buf_x" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+        cl_mem ln_test_buf_gamma = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
+                                                  EMBED_DIM * sizeof(float), ln_test_gamma, &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to allocate ln_test_buf_gamma" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+        cl_mem ln_test_buf_beta = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
+                                                 EMBED_DIM * sizeof(float), ln_test_beta, &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to allocate ln_test_buf_beta" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+        cl_mem ln_test_buf_out = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                                                SEQ_LEN * EMBED_DIM * sizeof(int8_t), ln_test_out, &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to allocate ln_test_buf_out" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+        cl_mem ln_test_buf_scaler = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                                                   SEQ_LEN * sizeof(float), ln_test_scaler, &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to allocate ln_test_buf_scaler" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        cl_mem ln_test_input_buffers[] = {ln_test_buf_x, ln_test_buf_gamma, ln_test_buf_beta};
+        cl_mem ln_test_output_buffers[] = {ln_test_buf_out, ln_test_buf_scaler};
+        cl_event ln_test_input_event = NULL;
+        cl_event ln_test_output_event = NULL;
+        cl_event ln_test_kernel_event = NULL;
+        cl_event ln_test_read_event = NULL;
+
+        debug_event_log("BEFORE enqueue LN self-test input migrate");
+        errCode = clEnqueueMigrateMemObjects(Command_Queue, 3, ln_test_input_buffers, 0, 0, NULL, &ln_test_input_event);
+        debug_event_status("AFTER enqueue LN self-test input migrate", ln_test_input_event);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to migrate LN self-test input buffers" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        debug_event_log("BEFORE enqueue LN self-test output migrate");
+        errCode = clEnqueueMigrateMemObjects(Command_Queue, 2, ln_test_output_buffers,
+                                             CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &ln_test_output_event);
+        debug_event_status("AFTER enqueue LN self-test output migrate", ln_test_output_event);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to migrate LN self-test output buffers" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        errCode = false;
+        errCode |= clSetKernelArg(K_layernorm[1], 0, sizeof(cl_mem), &ln_test_buf_x);
+        errCode |= clSetKernelArg(K_layernorm[1], 1, sizeof(cl_mem), &ln_test_buf_gamma);
+        errCode |= clSetKernelArg(K_layernorm[1], 2, sizeof(cl_mem), &ln_test_buf_beta);
+        errCode |= clSetKernelArg(K_layernorm[1], 3, sizeof(cl_mem), &ln_test_buf_out);
+        errCode |= clSetKernelArg(K_layernorm[1], 4, sizeof(cl_mem), &ln_test_buf_scaler);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to set LN self-test kernel arguments" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        cl_event ln_test_wait_list[] = {ln_test_input_event, ln_test_output_event};
+        debug_event_wait_list("BEFORE enqueue LN self-test kernel", 2, ln_test_wait_list);
+        errCode = clEnqueueTask(Command_Queue, K_layernorm[1], 2, ln_test_wait_list, &ln_test_kernel_event);
+        debug_event_status("AFTER enqueue LN self-test kernel", ln_test_kernel_event);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to submit LN self-test kernel" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+
+        debug_event_status("BEFORE wait LN self-test kernel", ln_test_kernel_event);
+        clWaitForEvents(1, &ln_test_kernel_event);
+        debug_event_status("AFTER wait LN self-test kernel", ln_test_kernel_event);
+
+        debug_event_log("BEFORE enqueue LN self-test readback");
+        errCode = clEnqueueMigrateMemObjects(Command_Queue, 2, ln_test_output_buffers,
+                                             CL_MIGRATE_MEM_OBJECT_HOST, 1, &ln_test_kernel_event, &ln_test_read_event);
+        debug_event_status("AFTER enqueue LN self-test readback", ln_test_read_event);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl
+                 << "HOST-Error: Failed to read back LN self-test outputs" << endl
+                 << endl;
+            return EXIT_FAILURE;
+        }
+        debug_event_status("BEFORE wait LN self-test readback", ln_test_read_event);
+        clWaitForEvents(1, &ln_test_read_event);
+        debug_event_status("AFTER wait LN self-test readback", ln_test_read_event);
+        debug_float_tensor_stats("LN self-test scaler", ln_test_scaler, SEQ_LEN);
+        cout << "[HOST-DATA] LN self-test out first_values:";
+        for (int i = 0; i < 8 && i < EMBED_DIM; i++)
+        {
+            cout << " " << static_cast<int>(ln_test_out[0][i]);
+        }
+        cout << endl;
+        cout.flush();
+
+        clReleaseEvent(ln_test_input_event);
+        clReleaseEvent(ln_test_output_event);
+        clReleaseEvent(ln_test_kernel_event);
+        clReleaseEvent(ln_test_read_event);
+        clReleaseMemObject(ln_test_buf_x);
+        clReleaseMemObject(ln_test_buf_gamma);
+        clReleaseMemObject(ln_test_buf_beta);
+        clReleaseMemObject(ln_test_buf_out);
+        clReleaseMemObject(ln_test_buf_scaler);
+        free(ln_test_x);
+        free(ln_test_gamma);
+        free(ln_test_beta);
+        free(ln_test_out);
+        free(ln_test_scaler);
+        debug_event_log("END integrated xclbin standalone LN self-test");
+    }
+
     // ============================================================================
     // Step 5: Run configured Spatial Transformer encoder blocks in sequence
     // ============================================================================
@@ -1926,7 +2260,7 @@ int main(int argc, char *argv[])
                 GlobMem_BUF_head_V[idx] = clCreateSubBuffer(GlobMem_BUF_V, CL_MEM_READ_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region, &errCode);
                 if (errCode != CL_SUCCESS)
                     return EXIT_FAILURE;
-                // notice that GlobMem_BUF_Attention_Out is INT
+                // Attention_Out is stored as fp32 per head.
                 GlobMem_BUF_head_Out[idx] = clCreateSubBuffer(GlobMem_BUF_Attention_Out, CL_MEM_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &head_region_out, &errCode);
                 if (errCode != CL_SUCCESS)
                     return EXIT_FAILURE;
@@ -1947,6 +2281,10 @@ int main(int argc, char *argv[])
                 GlobMem_BUF_frame_X[frame], GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta};
             cl_mem LayerNorm_Output_Buffers[] = {
                 GlobMem_BUF_frame_X_norm[frame], GlobMem_BUF_frame_LayerNorm_Scaler[frame]};
+            cl_mem LayerNorm1_Input_Buffers[] = {
+                GlobMem_BUF_frame_After_Attention_Residual_Float[frame],
+                GlobMem_BUF_LayerNorm1_Gamma,
+                GlobMem_BUF_LayerNorm1_Beta};
             cl_mem LinearLayerNorm_Input_Buffers[] = {
                 GlobMem_BUF_frame_X[frame],
                 GlobMem_BUF_LayerNorm_Gamma, GlobMem_BUF_LayerNorm_Beta,
@@ -2037,19 +2375,30 @@ int main(int argc, char *argv[])
             // move Q/K/V output buffers to Device
             // move Attention Output buffer to Device (TODO: is it useless?)
             // ------------------------------------------------------
+            debug_event_log("BEGIN block " + to_string(block) + ", frame " + to_string(frame) + " memory migration events");
             if (block == 0)
             {
+                debug_event_log("BEFORE enqueue Mem_op_event[0]: migrate 12 fused LN0/QKV inputs");
                 errCode = clEnqueueMigrateMemObjects(Command_Queue, 12, LinearLayerNorm_Input_Buffers, 0, 0, NULL, &Mem_op_event[0]);
             }
             else
             {
+                debug_event_log("BEFORE enqueue Mem_op_event[0]: migrate 11 fused LN0/QKV parameter inputs");
                 errCode = clEnqueueMigrateMemObjects(Command_Queue, 11, LinearLayerNorm_Input_Buffers + 1, 0, 0, NULL, &Mem_op_event[0]);
             }
+            debug_event_status("AFTER enqueue Mem_op_event[0]", Mem_op_event[0]);
+            debug_event_log("BEFORE enqueue Mem_op_event[1]: migrate Q/K/V output buffers");
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 3, QKV_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[1]);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Attention_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, NULL);
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * NUM_HEADS], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[2]);
+            debug_event_status("AFTER enqueue Mem_op_event[1]", Mem_op_event[1]);
+            debug_event_log("BEFORE enqueue Mem_op_event[2]: migrate frame attention output buffer");
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_Attention_Out[frame], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[2]);
+            debug_event_status("AFTER enqueue Mem_op_event[2]", Mem_op_event[2]);
+            debug_event_log("BEFORE enqueue Mem_op_event[3]: migrate projection input buffers");
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 3, Projection_Input_Buffers, 0, 0, NULL, &Mem_op_event[3]);
+            debug_event_status("AFTER enqueue Mem_op_event[3]", Mem_op_event[3]);
+            debug_event_log("BEFORE enqueue Mem_op_event[4]: migrate projection output buffer");
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_Attention_Projected[frame], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[4]);
+            debug_event_status("AFTER enqueue Mem_op_event[4]", Mem_op_event[4]);
             // origin error: errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_head_Out[frame * SEQ_LEN], CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[3]);
             if (errCode != CL_SUCCESS)
             {
@@ -2063,7 +2412,9 @@ int main(int argc, char *argv[])
             // Step 5.3: Submit Kernels for Execution
             // ----------------------------------------
             cl_event qkv_wait_list[] = {Mem_op_event[0], Mem_op_event[1]};
+            debug_event_wait_list("BEFORE enqueue K_exe_event[0] linear_qkv_multihead", 2, qkv_wait_list);
             errCode = clEnqueueTask(Command_Queue, K_linear_qkv_multihead, 2, qkv_wait_list, &K_exe_event[0]);
+            debug_event_status("AFTER enqueue K_exe_event[0] linear_qkv_multihead", K_exe_event[0]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2071,6 +2422,11 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
+#if HOST_DEBUG_SERIAL_STAGES
+            debug_event_status("BEFORE serial wait K_exe_event[0] linear_qkv_multihead", K_exe_event[0]);
+            clWaitForEvents(1, &K_exe_event[0]);
+            debug_event_status("AFTER serial wait K_exe_event[0] linear_qkv_multihead", K_exe_event[0]);
+#endif
 
             for (int h = 0; h < NUM_HEADS; h++)
             {
@@ -2078,7 +2434,9 @@ int main(int argc, char *argv[])
                 // setting K_attention_opt Args
                 cl_event attention_wait_list[] = {K_exe_event[0], Mem_op_event[2]};
                 // Compute Attention
+                debug_event_wait_list("BEFORE enqueue A_exe_event[" + to_string(h) + "] attention head " + to_string(h), 2, attention_wait_list);
                 errCode = clEnqueueTask(Command_Queue, K_attention_opt[h], 2, attention_wait_list, &A_exe_event[h]);
+                debug_event_status("AFTER enqueue A_exe_event[" + to_string(h) + "] attention head " + to_string(h), A_exe_event[h]);
                 if (errCode != CL_SUCCESS)
                 {
                     cout << endl
@@ -2086,6 +2444,11 @@ int main(int argc, char *argv[])
                          << endl;
                     return EXIT_FAILURE;
                 }
+#if HOST_DEBUG_SERIAL_STAGES
+                debug_event_status("BEFORE serial wait A_exe_event[" + to_string(h) + "] attention head " + to_string(h), A_exe_event[h]);
+                clWaitForEvents(1, &A_exe_event[h]);
+                debug_event_status("AFTER serial wait A_exe_event[" + to_string(h) + "] attention head " + to_string(h), A_exe_event[h]);
+#endif
             }
             auto Host_Post_Start = chrono::high_resolution_clock::now();
 
@@ -2100,7 +2463,9 @@ int main(int argc, char *argv[])
             projection_wait_list[NUM_HEADS] = Mem_op_event[3];
             projection_wait_list[NUM_HEADS + 1] = Mem_op_event[4];
 
+            debug_event_wait_list("BEFORE enqueue K_exe_event[1] projection_out", NUM_HEADS + 2, projection_wait_list);
             errCode = clEnqueueTask(Command_Queue, K_projection_out, NUM_HEADS + 2, projection_wait_list, &K_exe_event[1]);
+            debug_event_status("AFTER enqueue K_exe_event[1] projection_out", K_exe_event[1]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2108,9 +2473,76 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
+#if HOST_DEBUG_SERIAL_STAGES
+            debug_event_status("BEFORE serial wait K_exe_event[1] projection_out", K_exe_event[1]);
+            clWaitForEvents(1, &K_exe_event[1]);
+            debug_event_status("AFTER serial wait K_exe_event[1] projection_out", K_exe_event[1]);
+#endif
+            cl_mem attention_residual_input_debug_buffers[] = {
+                GlobMem_BUF_frame_X[frame],
+                GlobMem_BUF_frame_Attention_Projected[frame]};
+            cl_event attention_residual_inputs_read_event = NULL;
+            debug_event_log("BEFORE enqueue attention residual input debug readback: X and projected attention to host");
+            errCode = clEnqueueMigrateMemObjects(
+                Command_Queue,
+                2,
+                attention_residual_input_debug_buffers,
+                CL_MIGRATE_MEM_OBJECT_HOST,
+                1,
+                &K_exe_event[1],
+                &attention_residual_inputs_read_event);
+            debug_event_status("AFTER enqueue attention residual input debug readback", attention_residual_inputs_read_event);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to migrate attention residual inputs back to host for debug, block " << block << ", frame " << frame << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            debug_event_status("BEFORE wait attention residual input debug readback", attention_residual_inputs_read_event);
+            clWaitForEvents(1, &attention_residual_inputs_read_event);
+            debug_event_status("AFTER wait attention residual input debug readback", attention_residual_inputs_read_event);
+            debug_float_tensor_stats(
+                "attention residual input X block " + to_string(block) + ", frame " + to_string(frame),
+                reinterpret_cast<float *>(X + frame * SEQ_LEN),
+                static_cast<size_t>(SEQ_LEN) * EMBED_DIM);
+            debug_float_tensor_stats(
+                "attention residual input Attention_Projected block " + to_string(block) + ", frame " + to_string(frame),
+                reinterpret_cast<float *>(Attention_Projected + frame * SEQ_LEN),
+                static_cast<size_t>(SEQ_LEN) * EMBED_DIM);
+            debug_event_log("BEFORE release attention residual input debug readback event");
+            clReleaseEvent(attention_residual_inputs_read_event);
+            debug_event_log("AFTER release attention residual input debug readback event");
 
+            cl_event attention_residual_inputs_restore_event = NULL;
+            debug_event_log("BEFORE enqueue attention residual input restore: X and projected attention back to device");
+            errCode = clEnqueueMigrateMemObjects(
+                Command_Queue,
+                2,
+                attention_residual_input_debug_buffers,
+                0,
+                0,
+                NULL,
+                &attention_residual_inputs_restore_event);
+            debug_event_status("AFTER enqueue attention residual input restore", attention_residual_inputs_restore_event);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to restore attention residual inputs to device after debug readback, block " << block << ", frame " << frame << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            debug_event_status("BEFORE wait attention residual input restore", attention_residual_inputs_restore_event);
+            clWaitForEvents(1, &attention_residual_inputs_restore_event);
+            debug_event_status("AFTER wait attention residual input restore", attention_residual_inputs_restore_event);
+            debug_event_log("BEFORE release attention residual input restore event");
+            clReleaseEvent(attention_residual_inputs_restore_event);
+            debug_event_log("AFTER release attention residual input restore event");
+
+            debug_event_log("BEFORE enqueue Mem_op_event[6]: migrate attention residual output buffer");
             errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_After_Attention_Residual_Float[frame],
                                                  CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[6]);
+            debug_event_status("AFTER enqueue Mem_op_event[6]", Mem_op_event[6]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2120,7 +2552,9 @@ int main(int argc, char *argv[])
             }
 
             cl_event residual_wait_list[] = {K_exe_event[1], Mem_op_event[6]};
+            debug_event_wait_list("BEFORE enqueue K_exe_event[2] attention residual", 2, residual_wait_list);
             errCode = clEnqueueTask(Command_Queue, K_residual, 2, residual_wait_list, &K_exe_event[2]);
+            debug_event_status("AFTER enqueue K_exe_event[2] attention residual", K_exe_event[2]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2128,20 +2562,84 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
+#if HOST_DEBUG_SERIAL_STAGES
+            debug_event_status("BEFORE serial wait K_exe_event[2] attention residual", K_exe_event[2]);
+            clWaitForEvents(1, &K_exe_event[2]);
+            debug_event_status("AFTER serial wait K_exe_event[2] attention residual", K_exe_event[2]);
+#endif
+
+            cl_event ln1_input_read_event = NULL;
+            debug_event_log("BEFORE enqueue LN1 input debug readback: attention residual output to host");
+            errCode = clEnqueueMigrateMemObjects(
+                Command_Queue,
+                1,
+                &GlobMem_BUF_frame_After_Attention_Residual_Float[frame],
+                CL_MIGRATE_MEM_OBJECT_HOST,
+                1,
+                &K_exe_event[2],
+                &ln1_input_read_event);
+            debug_event_status("AFTER enqueue LN1 input debug readback", ln1_input_read_event);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to migrate LN1 input back to host for debug, block " << block << ", frame " << frame << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            debug_event_status("BEFORE wait LN1 input debug readback", ln1_input_read_event);
+            clWaitForEvents(1, &ln1_input_read_event);
+            debug_event_status("AFTER wait LN1 input debug readback", ln1_input_read_event);
+            debug_float_tensor_stats(
+                "LN1 input After_Attention_Residual_Float block " + to_string(block) + ", frame " + to_string(frame),
+                reinterpret_cast<float *>(After_Attention_Residual_Float + frame * SEQ_LEN),
+                static_cast<size_t>(SEQ_LEN) * EMBED_DIM);
+            debug_event_log("BEFORE release LN1 input debug readback event");
+            clReleaseEvent(ln1_input_read_event);
+            debug_event_log("AFTER release LN1 input debug readback event");
+
+            cl_event ln1_input_restore_event = NULL;
+            debug_event_log("BEFORE enqueue LN1 input restore: attention residual output back to device");
+            errCode = clEnqueueMigrateMemObjects(
+                Command_Queue,
+                1,
+                &GlobMem_BUF_frame_After_Attention_Residual_Float[frame],
+                0,
+                0,
+                NULL,
+                &ln1_input_restore_event);
+            debug_event_status("AFTER enqueue LN1 input restore", ln1_input_restore_event);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl
+                     << "Host-Error: Failed to restore LN1 input to device after debug readback, block " << block << ", frame " << frame << endl
+                     << endl;
+                return EXIT_FAILURE;
+            }
+            debug_event_status("BEFORE wait LN1 input restore", ln1_input_restore_event);
+            clWaitForEvents(1, &ln1_input_restore_event);
+            debug_event_status("AFTER wait LN1 input restore", ln1_input_restore_event);
+            debug_event_log("BEFORE release LN1 input restore event");
+            clReleaseEvent(ln1_input_restore_event);
+            debug_event_log("AFTER release LN1 input restore event");
 
             auto Host_Post_Mid = chrono::high_resolution_clock::now();
             Host_Post_Time_ms += chrono::duration<double, std::milli>(Host_Post_Mid - Host_Post_Start).count();
-            cout << "------------MLP compute finish---------------------\n";
             // ---------------------------------------------------------
             // Step 5.4-1: Compute LayerNorm1 at Device
             // ---------------------------------------------------------
-            memcpy(LayerNorm_gamma, LayerNorm1_gamma, EMBED_DIM * sizeof(float));
-            memcpy(LayerNorm_beta, LayerNorm1_beta, EMBED_DIM * sizeof(float));
+            debug_float_tensor_stats(
+                "LN1 source gamma block " + to_string(block) + ", frame " + to_string(frame),
+                LayerNorm1_gamma,
+                EMBED_DIM);
+            debug_float_tensor_stats(
+                "LN1 source beta block " + to_string(block) + ", frame " + to_string(frame),
+                LayerNorm1_beta,
+                EMBED_DIM);
 
             errCode = false;
             errCode |= clSetKernelArg(K_layernorm[1], 0, sizeof(cl_mem), &GlobMem_BUF_frame_After_Attention_Residual_Float[frame]);
-            errCode |= clSetKernelArg(K_layernorm[1], 1, sizeof(cl_mem), &GlobMem_BUF_LayerNorm_Gamma);
-            errCode |= clSetKernelArg(K_layernorm[1], 2, sizeof(cl_mem), &GlobMem_BUF_LayerNorm_Beta);
+            errCode |= clSetKernelArg(K_layernorm[1], 1, sizeof(cl_mem), &GlobMem_BUF_LayerNorm1_Gamma);
+            errCode |= clSetKernelArg(K_layernorm[1], 2, sizeof(cl_mem), &GlobMem_BUF_LayerNorm1_Beta);
             errCode |= clSetKernelArg(K_layernorm[1], 3, sizeof(cl_mem), &GlobMem_BUF_frame_X_norm[frame]);
             errCode |= clSetKernelArg(K_layernorm[1], 4, sizeof(cl_mem), &GlobMem_BUF_frame_LayerNorm_Scaler[frame]);
             if (errCode != CL_SUCCESS)
@@ -2152,8 +2650,12 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
             errCode = false;
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Input_Buffers + 1, 0, 0, NULL, &Mem_op_event[10]);
+            debug_event_log("BEFORE enqueue Mem_op_event[10]: migrate LN1 gamma/beta buffers");
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm1_Input_Buffers + 1, 0, 0, NULL, &Mem_op_event[10]);
+            debug_event_status("AFTER enqueue Mem_op_event[10]", Mem_op_event[10]);
+            debug_event_log("BEFORE enqueue Mem_op_event[11]: migrate LN1 output buffers");
             errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, LayerNorm_Output_Buffers, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[11]);
+            debug_event_status("AFTER enqueue Mem_op_event[11]", Mem_op_event[11]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2162,9 +2664,18 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
 
+            debug_event_status("BEFORE serial wait Mem_op_event[10] LN1 gamma/beta buffers", Mem_op_event[10]);
+            clWaitForEvents(1, &Mem_op_event[10]);
+            debug_event_status("AFTER serial wait Mem_op_event[10] LN1 gamma/beta buffers", Mem_op_event[10]);
+            debug_event_status("BEFORE serial wait Mem_op_event[11] LN1 output buffers", Mem_op_event[11]);
+            clWaitForEvents(1, &Mem_op_event[11]);
+            debug_event_status("AFTER serial wait Mem_op_event[11] LN1 output buffers", Mem_op_event[11]);
+
             cl_event layernorm1_wait_list[] = {K_exe_event[2], Mem_op_event[10], Mem_op_event[11]};
 
+            debug_event_wait_list("BEFORE enqueue K_exe_event[3] LN1 layernorm", 3, layernorm1_wait_list);
             errCode = clEnqueueTask(Command_Queue, K_layernorm[1], 3, layernorm1_wait_list, &K_exe_event[3]);
+            debug_event_status("AFTER enqueue K_exe_event[3] LN1 layernorm", K_exe_event[3]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2172,6 +2683,11 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
+#if HOST_DEBUG_SERIAL_STAGES
+            debug_event_status("BEFORE serial wait K_exe_event[3] LN1 layernorm", K_exe_event[3]);
+            clWaitForEvents(1, &K_exe_event[3]);
+            debug_event_status("AFTER serial wait K_exe_event[3] LN1 layernorm", K_exe_event[3]);
+#endif
 
             errCode = false;
             errCode |= clSetKernelArg(K_mlp_q, 0, sizeof(cl_mem), &GlobMem_BUF_frame_X_norm[frame]);
@@ -2196,7 +2712,9 @@ int main(int argc, char *argv[])
                 GlobMem_BUF_MLP_b1, GlobMem_BUF_MLP_b2,
                 GlobMem_BUF_MLP_scale_w1, GlobMem_BUF_MLP_scale_w2};
             cl_event mlp_param_event = nullptr;
+            debug_event_log("BEFORE enqueue mlp_param_event: migrate MLP parameter buffers");
             errCode = clEnqueueMigrateMemObjects(Command_Queue, 6, MLP_Param_Buffers, 0, 0, NULL, &mlp_param_event);
+            debug_event_status("AFTER enqueue mlp_param_event", mlp_param_event);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2204,12 +2722,18 @@ int main(int argc, char *argv[])
                      << endl;
                 return EXIT_FAILURE;
             }
+            debug_event_status("BEFORE wait mlp_param_event", mlp_param_event);
             clWaitForEvents(1, &mlp_param_event);
+            debug_event_status("AFTER wait mlp_param_event", mlp_param_event);
+            debug_event_log("BEFORE release mlp_param_event");
             clReleaseEvent(mlp_param_event);
+            debug_event_log("AFTER release mlp_param_event");
 
             cl_event mlp_output_alloc_event = nullptr;
             cl_mem mlp_output_buffer[] = {GlobMem_BUF_MLP_Output};
+            debug_event_log("BEFORE enqueue mlp_output_alloc_event: migrate MLP output buffer");
             errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, mlp_output_buffer, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &mlp_output_alloc_event);
+            debug_event_status("AFTER enqueue mlp_output_alloc_event", mlp_output_alloc_event);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2236,7 +2760,9 @@ int main(int argc, char *argv[])
                 }
 
                 cl_event mlp_wait_list[] = {K_exe_event[3], mlp_output_alloc_event};
+                debug_event_wait_list("BEFORE enqueue mlp_kernel_event token_start=" + to_string(token_start), 2, mlp_wait_list);
                 errCode = clEnqueueTask(Command_Queue, K_mlp_q, 2, mlp_wait_list, &mlp_kernel_event);
+                debug_event_status("AFTER enqueue mlp_kernel_event token_start=" + to_string(token_start), mlp_kernel_event);
                 if (errCode != CL_SUCCESS)
                 {
                     cout << endl
@@ -2261,12 +2787,14 @@ int main(int argc, char *argv[])
             }
 
             vector<cl_event> mlp_residual_wait_list = mlp_tile_events;
+            debug_event_wait_list("BEFORE enqueue K_exe_event[4] MLP residual", static_cast<cl_uint>(mlp_residual_wait_list.size()), mlp_residual_wait_list.data());
             errCode = clEnqueueTask(
                 Command_Queue,
                 K_residual,
                 static_cast<cl_uint>(mlp_residual_wait_list.size()),
                 mlp_residual_wait_list.data(),
                 &K_exe_event[4]);
+            debug_event_status("AFTER enqueue K_exe_event[4] MLP residual", K_exe_event[4]);
             if (errCode != CL_SUCCESS)
             {
                 cout << endl
@@ -2275,10 +2803,44 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
 
+            debug_event_log("UPSTREAM SNAPSHOT before waiting for MLP residual, block " + to_string(block) + ", frame " + to_string(frame));
+            debug_event_status("UPSTREAM Mem_op_event[0] fused LN0/QKV inputs", Mem_op_event[0]);
+            debug_event_status("UPSTREAM Mem_op_event[1] Q/K/V output buffers", Mem_op_event[1]);
+            debug_event_status("UPSTREAM Mem_op_event[2] frame attention output buffer", Mem_op_event[2]);
+            debug_event_status("UPSTREAM K_exe_event[0] linear_qkv_multihead", K_exe_event[0]);
+            for (int h = 0; h < NUM_HEADS; h++)
+            {
+                debug_event_status("UPSTREAM A_exe_event[" + to_string(h) + "] attention head " + to_string(h), A_exe_event[h]);
+            }
+            debug_event_status("UPSTREAM Mem_op_event[3] projection input buffers", Mem_op_event[3]);
+            debug_event_status("UPSTREAM Mem_op_event[4] projection output buffer", Mem_op_event[4]);
+            debug_event_status("UPSTREAM K_exe_event[1] projection_out", K_exe_event[1]);
+            debug_event_status("UPSTREAM Mem_op_event[6] attention residual output buffer", Mem_op_event[6]);
+            debug_event_status("UPSTREAM K_exe_event[2] attention residual", K_exe_event[2]);
+            debug_event_status("UPSTREAM Mem_op_event[10] LN1 gamma/beta buffers", Mem_op_event[10]);
+            debug_event_status("UPSTREAM Mem_op_event[11] LN1 output buffers", Mem_op_event[11]);
+            debug_event_status("UPSTREAM K_exe_event[3] LN1 layernorm", K_exe_event[3]);
+            debug_event_status("UPSTREAM mlp_output_alloc_event", mlp_output_alloc_event);
+            for (size_t i = 0; i < mlp_tile_events.size(); i++)
+            {
+                debug_event_status("UPSTREAM mlp_tile_event[" + to_string(i) + "]", mlp_tile_events[i]);
+            }
+            debug_event_status("UPSTREAM K_exe_event[4] MLP residual", K_exe_event[4]);
+            debug_event_log("END UPSTREAM SNAPSHOT");
+
+            debug_event_status("BEFORE wait K_exe_event[4] MLP residual", K_exe_event[4]);
             clWaitForEvents(1, &K_exe_event[4]);
+            debug_event_status("AFTER wait K_exe_event[4] MLP residual", K_exe_event[4]);
+            cout << "------------MLP compute finish---------------------\n";
+            debug_event_log("BEFORE release mlp_output_alloc_event");
             clReleaseEvent(mlp_output_alloc_event);
+            debug_event_log("AFTER release mlp_output_alloc_event");
             for (cl_event evt : mlp_tile_events)
+            {
+                debug_event_status("BEFORE release mlp_tile_event", evt);
                 clReleaseEvent(evt);
+                debug_event_log("AFTER release mlp_tile_event");
+            }
 
             auto Host_Post_End = chrono::high_resolution_clock::now();
             Host_Post_Time_ms += chrono::duration<double, std::milli>(Host_Post_End - Host_Post_Mid).count();
@@ -2310,7 +2872,9 @@ int main(int argc, char *argv[])
             Total_Kernel_Events += Nb_Of_Exe_Events;
         }
 
+        debug_event_log("BEFORE clFinish after encoder block " + to_string(block));
         clFinish(Command_Queue);
+        debug_event_log("AFTER clFinish after encoder block " + to_string(block));
 
         for (int frame = 0; frame < FRAME; frame++)
         {
@@ -2327,11 +2891,15 @@ int main(int argc, char *argv[])
 
     cout << endl
          << "HOST_Info: Waiting for application to be completed ..." << endl;
+    debug_event_log("BEFORE final clFinish before output read");
     clFinish(Command_Queue);
+    debug_event_log("AFTER final clFinish before output read");
 
     cl_event final_output_read_event = nullptr;
+    debug_event_log("BEFORE enqueue final_output_read_event: migrate final spatial encoder output to host");
     errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_X,
                                          CL_MIGRATE_MEM_OBJECT_HOST, 0, NULL, &final_output_read_event);
+    debug_event_status("AFTER enqueue final_output_read_event", final_output_read_event);
     if (errCode != CL_SUCCESS)
     {
         cout << endl
@@ -2339,7 +2907,9 @@ int main(int argc, char *argv[])
              << endl;
         return EXIT_FAILURE;
     }
+    debug_event_status("BEFORE wait final_output_read_event", final_output_read_event);
     clWaitForEvents(1, &final_output_read_event);
+    debug_event_status("AFTER wait final_output_read_event", final_output_read_event);
 
 // ============================================================================
 // Step 6: Processing Output Results
@@ -2406,10 +2976,20 @@ int main(int argc, char *argv[])
     clReleaseDevice(Target_Device_ID); // Only available in OpenCL >= 1.2
 
     for (cl_event evt : Profiling_Memory_Events)
+    {
+        debug_event_status("BEFORE release profiling memory event", evt);
         clReleaseEvent(evt);
+        debug_event_log("AFTER release profiling memory event");
+    }
     for (cl_event evt : Profiling_Kernel_Events)
+    {
+        debug_event_status("BEFORE release profiling kernel event", evt);
         clReleaseEvent(evt);
+        debug_event_log("AFTER release profiling kernel event");
+    }
+    debug_event_status("BEFORE release final_output_read_event", final_output_read_event);
     clReleaseEvent(final_output_read_event);
+    debug_event_log("AFTER release final_output_read_event");
 
     for (int f = 0; f < FRAME; f++)
     {
@@ -2431,6 +3011,8 @@ int main(int argc, char *argv[])
 
     clReleaseMemObject(GlobMem_BUF_LayerNorm_Gamma);
     clReleaseMemObject(GlobMem_BUF_LayerNorm_Beta);
+    clReleaseMemObject(GlobMem_BUF_LayerNorm1_Gamma);
+    clReleaseMemObject(GlobMem_BUF_LayerNorm1_Beta);
     clReleaseMemObject(GlobMem_BUF_LayerNorm_Scaler);
 
     clReleaseMemObject(GlobMem_BUF_Wq);
