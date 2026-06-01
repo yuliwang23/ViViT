@@ -56,6 +56,7 @@ using namespace std;
 #define ALL_MESSAGES
 #define HOST_DEBUG_SERIAL_STAGES 1
 #define HOST_DEBUG_LN_SELF_TEST 0
+#define HOST_DEBUG_READBACK 0
 
 constexpr int MLP_KERNEL_SEQ_LEN = SEQ_LEN;
 constexpr int MLP_CHUNK_U32 = 8;
@@ -2528,6 +2529,7 @@ int main(int argc, char *argv[])
             clWaitForEvents(1, &K_exe_event[1]);
             debug_event_status("AFTER serial wait K_exe_event[1] projection_out", K_exe_event[1]);
 #endif
+#if HOST_DEBUG_READBACK
             cl_mem attention_residual_input_debug_buffers[] = {
                 GlobMem_BUF_frame_X[frame],
                 GlobMem_BUF_frame_Attention_Projected[frame]};
@@ -2588,6 +2590,7 @@ int main(int argc, char *argv[])
             debug_event_log("BEFORE release attention residual input restore event");
             clReleaseEvent(attention_residual_inputs_restore_event);
             debug_event_log("AFTER release attention residual input restore event");
+#endif
 
             debug_event_log("BEFORE enqueue Mem_op_event[6]: migrate attention residual output buffer");
             errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_frame_After_Attention_Residual_Float[frame],
@@ -2618,6 +2621,7 @@ int main(int argc, char *argv[])
             debug_event_status("AFTER serial wait K_exe_event[2] attention residual", K_exe_event[2]);
 #endif
 
+#if HOST_DEBUG_READBACK
             cl_event ln1_input_read_event = NULL;
             debug_event_log("BEFORE enqueue LN1 input debug readback: attention residual output to host");
             errCode = clEnqueueMigrateMemObjects(
@@ -2671,6 +2675,7 @@ int main(int argc, char *argv[])
             debug_event_log("BEFORE release LN1 input restore event");
             clReleaseEvent(ln1_input_restore_event);
             debug_event_log("AFTER release LN1 input restore event");
+#endif
 
             auto Host_Post_Mid = chrono::high_resolution_clock::now();
             Host_Post_Time_ms += chrono::duration<double, std::milli>(Host_Post_Mid - Host_Post_Start).count();
