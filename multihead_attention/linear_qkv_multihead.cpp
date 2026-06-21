@@ -1095,3 +1095,72 @@ void store_Final_Tile_FIFO2HBM(
         }
     }
 }
+
+void process_o_proj_single_tile_dataflow(
+    int64_dt URAM_Quant_Out[SEQ_LEN][TOTAL_DIM / INT8_PACK], 
+    uint256_dt *HBM_X_Res,
+    hls::stream<uint256_dt> &FIFO_Wo, 
+    uint256_dt *HBM_Out,
+    float out_scaler[SEQ_LEN],   
+    float BRAM_bo[TOTAL_DIM],    
+    float scale_wo[TOTAL_DIM],   
+    int iter
+) {
+    #pragma HLS DATAFLOW
+
+    hls::stream<uint256_dt> FIFO_Res("FIFO_Res");
+    hls::stream<uint256_dt> FIFO_Final_Out("FIFO_Final_Out");
+
+#ifdef __SYNTHESIS__
+    #pragma HLS STREAM variable=FIFO_Res depth=32
+    #pragma HLS STREAM variable=FIFO_Final_Out depth=32
+#endif
+
+    load_Residual_Tile_HBM2FIFO(HBM_X_Res, FIFO_Res, iter);
+
+    compute_output_proj_and_residual(
+        URAM_Quant_Out, 
+        FIFO_Wo, 
+        FIFO_Res, 
+        FIFO_Final_Out, 
+        out_scaler, 
+        BRAM_bo, 
+        scale_wo, 
+        iter
+    );
+
+    store_Final_Tile_FIFO2HBM(FIFO_Final_Out, HBM_Out, iter);
+}
+
+void run_full_output_projection(
+    int64_dt URAM_Quant_Out[SEQ_LEN][TOTAL_DIM / INT8_PACK], 
+    uint256_dt *HBM_Wo,          
+    uint256_dt *HBM_X_Res,      
+    uint256_dt *HBM_Out,         
+    float out_scaler[SEQ_LEN],   
+    float BRAM_bo[TOTAL_DIM],    
+    float scale_wo[TOTAL_DIM]
+) {
+    hls::stream<uint256_dt> FIFO_Wo("FIFO_Wo");
+#ifdef __SYNTHESIS__
+    #pragma HLS STREAM variable=FIFO_Wo depth=64
+#endif
+
+    const int NUM_TILES = TOTAL_DIM / TILE_SIZE;
+
+    full_proj_loop:
+    for (int iter = 0; iter < NUM_TILES; iter++) {
+        load_Weight_tile_HBM2FIFO(HBM_Wo, FIFO_Wo, iter);
+
+        process_o_proj_single_tile_dataflow(
+            URAM_Quant_Out,
+            HBM_X_Res,
+            FIFO_Wo,
+            HBM_Out,
+            out_scaler,
+            BRAM_bo,
+            scale_wo,
+            iter
+        );
+    }
+}
