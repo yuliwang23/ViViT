@@ -332,7 +332,7 @@ void compute_mean_variance(
             int idx = j + k;
 
             float scaled_val = norm_buffer[idx] * scale;
-            float clamped_val = std::max(-128.0f, std::min(127.0f, scaled_val));
+            float clamped_val = std::max(-128.0f, std::min(127.5f, scaled_val));
             int8_dt q_val = static_cast<int8_dt>(clamped_val >= 0 ? clamped_val + 0.5f : clamped_val - 0.5f);
             
             int bit_offset = (k % 8) * 8; 
@@ -677,7 +677,7 @@ void process_attention_one_head_dataflow(
     #pragma HLS STREAM variable=FIFO_Q_out depth=32
     #pragma HLS STREAM variable=FIFO_K_out depth=32
     #pragma HLS STREAM variable=FIFO_V_out depth=32
-    #pragma HLS STREAM variable=FIFO_Softmax_out depth=200
+    #pragma HLS STREAM variable=FIFO_Softmax_out depth=40000
     #pragma HLS STREAM variable=FIFO_Softmax_scaler_out depth=2
 #endif
     load_Weight_tile_HBM2FIFO(Wq, FIFO_Wq, head_idx);
@@ -761,8 +761,8 @@ void qkv_sram_and_quantize(
 
         max_q = std::max(max_q, EPSILON);
         max_k = std::max(max_k, EPSILON);
-        float scale_q_val = 127.0f / max_q;
-        float scale_k_val = 127.0f / max_k;
+        float scale_q_val = 127.5f / max_q;
+        float scale_k_val = 127.5f / max_k;
 
         pack_and_write_qk_loop:
         for (int j = 0; j < HEAD_DIM / INT8_PACK; j++) {
@@ -774,8 +774,8 @@ void qkv_sram_and_quantize(
                 #pragma HLS UNROLL
                 int idx = j * INT8_PACK + k;
                 
-                int8_dt q_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, local_q[idx] * scale_q_val)));
-                int8_dt k_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, local_k[idx] * scale_k_val)));
+                int8_dt q_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.5f, local_q[idx] * scale_q_val)));
+                int8_dt k_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.5f, local_k[idx] * scale_k_val)));
                 
                 int start_bit = k * 8;
                 int end_bit = start_bit + 7;
@@ -807,7 +807,7 @@ void qkv_sram_and_quantize(
         }
 
         max_v = std::max(max_v, EPSILON);
-        float scale_v_val = 127.0f / max_v;
+        float scale_v_val = 127.5f / max_v;
         
         write_v_transposed_packed_loop:
         for (int i = 0; i < SEQ_LEN_PADDED / INT8_PACK; i++) {
@@ -819,7 +819,7 @@ void qkv_sram_and_quantize(
                 int orig_idx = i * INT8_PACK + k;
                 int8_dt v_val = 0;
                 if (orig_idx < SEQ_LEN) {
-                    v_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, local_v_col[orig_idx] * scale_v_val)));
+                    v_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.5f, local_v_col[orig_idx] * scale_v_val)));
                 }
 
                 int start_bit = k * 8;
@@ -917,7 +917,7 @@ void compute_score_and_softmax(
         }
 
         float inv_sum = 1.0f / exp_sum; 
-        float row_scaler = inv_sum / 127.0f; 
+        float row_scaler = inv_sum / 127.5f; 
         FIFO_Softmax_scaler_out.write(row_scaler);
         
         pass3_quantize_write:
@@ -928,7 +928,7 @@ void compute_score_and_softmax(
             int8_dt q_softmax = 0;
             
             if (k < SEQ_LEN) {
-                q_softmax = (int8_dt)std::round(exp_val * 127.0f);
+                q_softmax = (int8_dt)std::round(exp_val * 127.5f);
             }
             
             FIFO_Softmax_out.write(q_softmax);
@@ -1056,8 +1056,8 @@ void quantize_attention_output(
             
             if (j == 0) {
                 float max_val = std::max(global_max[i], EPSILON);
-                scale = 127.0f / max_val;
-                out_scaler[i] = max_val / 127.0f; 
+                scale = 127.5f / max_val;
+                out_scaler[i] = max_val / 127.5f; 
             }
             
             int64_dt packed_int8 = 0;
@@ -1073,8 +1073,8 @@ void quantize_attention_output(
                 conv0.i = fp32_pack.range(31, 0);
                 conv1.i = fp32_pack.range(63, 32);
 
-                int8_dt q0 = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, conv0.f * scale)));
-                int8_dt q1 = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, conv1.f * scale)));
+                int8_dt q0 = (int8_dt)std::round(std::max(-128.0f, std::min(127.5f, conv0.f * scale)));
+                int8_dt q1 = (int8_dt)std::round(std::max(-128.0f, std::min(127.5f, conv1.f * scale)));
 
                 int start_bit_0 = (p * 2) * 8;
                 int start_bit_1 = (p * 2 + 1) * 8;
