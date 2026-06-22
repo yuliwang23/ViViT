@@ -1,65 +1,85 @@
-#include "linear_qkv_multihead.h"
+#include "multihead_attention.h"
+
+
 extern "C"{
-void linear_qkv_multihead(
+void multihead_attention(
+    // Input Feature Map (Used for both LayerNorm and Residual)
     uint256_dt *x,
+    
+    // LayerNorm Weights
     uint256_dt *gamma,
     uint256_dt *beta,
+    
+    // QKV & Output Projection Weights
+    uint256_dt *Wq,
     uint256_dt *Wk,
     uint256_dt *Wv,
-    uint256_dt *Wq,
+    uint256_dt *Wo,
+    
+    // Biases
     float *bq,
     float *bk,
     float *bv,
+    float *bo,
+    
+    // Scales
     float *scale_wq,
     float *scale_wk,
     float *scale_wv,
-    uint256_dt *Q,
-    uint256_dt *K,
-    uint256_dt *V)
+    float *scale_wo,
+    
+    // Final Output
+    uint256_dt *out)
 {
+    // ========================================================================
+    // AXI Master Interfaces
+    // ========================================================================
     // Group 1: Native 256-bit Input Feature Map & LayerNorm Weights
     #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_x     depth=18912 max_widen_bitwidth=256
     #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_x     depth=96    max_widen_bitwidth=256
     #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_x     depth=96    max_widen_bitwidth=256
     
-    // Group 2: Native 32-bit Floating-Point Vectors (Separated to avoid wrapc struct alignment crash)
+    // Group 2: Native 32-bit Floating-Point Vectors (Biases & Scales)
     #pragma HLS INTERFACE m_axi port=bq       offset=slave bundle=gmem_bias  depth=768
     #pragma HLS INTERFACE m_axi port=bk       offset=slave bundle=gmem_bias  depth=768
     #pragma HLS INTERFACE m_axi port=bv       offset=slave bundle=gmem_bias  depth=768
+    #pragma HLS INTERFACE m_axi port=bo       offset=slave bundle=gmem_bias  depth=768
     #pragma HLS INTERFACE m_axi port=scale_wq offset=slave bundle=gmem_bias  depth=768
     #pragma HLS INTERFACE m_axi port=scale_wk offset=slave bundle=gmem_bias  depth=768
     #pragma HLS INTERFACE m_axi port=scale_wv offset=slave bundle=gmem_bias  depth=768
+    #pragma HLS INTERFACE m_axi port=scale_wo offset=slave bundle=gmem_bias  depth=768
 
-    // Group 3: Q-Stream Weights & Outputs (Matched 256-bit width)
+    // Group 3: Weights & Output (Matched 256-bit width)
     #pragma HLS INTERFACE m_axi port=Wq       offset=slave bundle=gmem_q     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=Q        offset=slave bundle=gmem_q     depth=18912 max_widen_bitwidth=256
-    
-    // Group 4: K-Stream Weights & Outputs (Matched 256-bit width)
     #pragma HLS INTERFACE m_axi port=Wk       offset=slave bundle=gmem_k     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=K        offset=slave bundle=gmem_k     depth=18912 max_widen_bitwidth=256
-    
-    // Group 5: V-Stream Weights & Outputs (Matched 256-bit width)
     #pragma HLS INTERFACE m_axi port=Wv       offset=slave bundle=gmem_v     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=V        offset=slave bundle=gmem_v     depth=18912 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wo       offset=slave bundle=gmem_o     depth=18432 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_o     depth=18912 max_widen_bitwidth=256
 
-    // S_AXILite Control Register Interfaces
+    // ========================================================================
+    // AXI-Lite Control Register Interfaces
+    // ========================================================================
     #pragma HLS INTERFACE s_axilite port=x        bundle=control
     #pragma HLS INTERFACE s_axilite port=gamma    bundle=control
     #pragma HLS INTERFACE s_axilite port=beta     bundle=control
-    #pragma HLS INTERFACE s_axilite port=Wk       bundle=control
-    #pragma HLS INTERFACE s_axilite port=V        bundle=control
     #pragma HLS INTERFACE s_axilite port=Wq       bundle=control
+    #pragma HLS INTERFACE s_axilite port=Wk       bundle=control
     #pragma HLS INTERFACE s_axilite port=Wv       bundle=control
+    #pragma HLS INTERFACE s_axilite port=Wo       bundle=control
     #pragma HLS INTERFACE s_axilite port=bq       bundle=control
     #pragma HLS INTERFACE s_axilite port=bk       bundle=control
     #pragma HLS INTERFACE s_axilite port=bv       bundle=control
+    #pragma HLS INTERFACE s_axilite port=bo       bundle=control
     #pragma HLS INTERFACE s_axilite port=scale_wq bundle=control
     #pragma HLS INTERFACE s_axilite port=scale_wk bundle=control
     #pragma HLS INTERFACE s_axilite port=scale_wv bundle=control
-    #pragma HLS INTERFACE s_axilite port=Q        bundle=control
-    #pragma HLS INTERFACE s_axilite port=K        bundle=control
+    #pragma HLS INTERFACE s_axilite port=scale_wo bundle=control
+    #pragma HLS INTERFACE s_axilite port=out      bundle=control
     #pragma HLS INTERFACE s_axilite port=return   bundle=control
 
+    // ========================================================================
+    // On-Chip Memory Allocation (SRAM / BRAM / URAM)
+    // ========================================================================
     float SRAM_gamma[EMBED_DIM];
     float SRAM_beta[EMBED_DIM];
     #pragma HLS ARRAY_PARTITION variable=SRAM_gamma type=cyclic factor=8
@@ -74,37 +94,79 @@ void linear_qkv_multihead(
     #pragma HLS ARRAY_PARTITION variable=SRAM_swk dim=1 type=cyclic factor=8
     #pragma HLS ARRAY_PARTITION variable=SRAM_swv dim=1 type=cyclic factor=8
 
+    // Internal Buffers for Inter-Module Communication
     static int64_dt X_package[SEQ_LEN][EMBED_DIM_package];
     float scaler_X[SEQ_LEN];
     #pragma HLS ARRAY_PARTITION variable=X_package type=cyclic factor=2 dim=2
     #pragma HLS BIND_STORAGE variable=X_package type=ram_2p impl=uram
 
+    static int64_dt URAM_Out[SEQ_LEN][EMBED_DIM / FP32_PACK];
+    float global_max[SEQ_LEN];
+    static int64_dt URAM_Quant_Out[SEQ_LEN][EMBED_DIM / INT8_PACK];
+    float out_scaler[SEQ_LEN];
+    
+    #pragma HLS ARRAY_PARTITION variable=URAM_Out dim=2 type=cyclic factor=4
+    #pragma HLS BIND_STORAGE variable=URAM_Out type=ram_2p impl=uram
+    #pragma HLS BIND_STORAGE variable=global_max type=ram_2p impl=bram
+    #pragma HLS BIND_STORAGE variable=URAM_Quant_Out type=ram_2p impl=uram
+
+    // ========================================================================
+    // Execution Flow
+    // ========================================================================
+    
+    // Step 1: Load LayerNorm Weights
     load_beta_gamma_HBM2SRAM(gamma, beta, SRAM_gamma, SRAM_beta);
     
+    // Step 2: Load QKV Biases & Scales to BRAM
     load_Bias_HBM2BRAM(bq, SRAM_bq);
     load_Bias_HBM2BRAM(bk, SRAM_bk);
     load_Bias_HBM2BRAM(bv, SRAM_bv);
-    
     load_Bias_HBM2BRAM(scale_wq, SRAM_swq);
     load_Bias_HBM2BRAM(scale_wk, SRAM_swk);
     load_Bias_HBM2BRAM(scale_wv, SRAM_swv);
 
+    // Step 3: Compute LayerNorm and pack feature map X
     do_layernorm_dataflow(x, SRAM_gamma, SRAM_beta, scaler_X, X_package);
 
-    tile_loop:
-    for (int iter = 0; iter < EMBED_DIM / TILE_SIZE; iter++) {
-        process_single_tile(
+    // Step 4: Multi-Head Attention Computation
+    head_loop:
+    for (int head_idx = 0; head_idx < NUM_HEADS; head_idx++) {
+        process_attention_one_head_dataflow(
             X_package,
             Wq, Wk, Wv,
-            Q, K, V,
             SRAM_bq, SRAM_bk, SRAM_bv,
             SRAM_swq, SRAM_swk, SRAM_swv,
             scaler_X,
-            iter
+            URAM_Out,
+            global_max,
+            head_idx
         );
     }
+
+    // Step 5: Quantize the full FP32 Attention Output to INT8
+    quantize_attention_output(
+        URAM_Out,
+        global_max,
+        URAM_Quant_Out,
+        out_scaler
+    );
+
+    // Step 6: Final Output Projection & Residual Connection (Reusing input 'x')
+    run_full_output_projection(
+        URAM_Quant_Out,
+        Wo,
+        x, // Pass 'x' directly as the residual component
+        out,
+        out_scaler,
+        bo,
+        scale_wo
+    );
 }
 }
+
+//  =======================================================================
+//     load X
+//  =======================================================================
 
 void load_X_HBM2FIFO(
     uint256_dt *HBM_X,
@@ -117,6 +179,10 @@ void load_X_HBM2FIFO(
         FIFO_X.write(temp_chunk);
     }
 }
+
+//  =======================================================================
+//     laod X
+//  =======================================================================
 
 void load_X_FIFO2BRAM(
     hls::stream<uint256_dt> &FIFO_X,
@@ -146,6 +212,10 @@ void load_X_FIFO2BRAM(
        }
    }
 }
+
+//  =======================================================================
+//     laod beta gamma
+//  =======================================================================
 
 void load_beta_gamma_HBM2SRAM(
     uint256_dt HBM_gamma[EMBED_DIM / 8],
@@ -179,6 +249,10 @@ void load_beta_gamma_HBM2SRAM(
         }
     }
 }
+
+//  =======================================================================
+//     mean and variance
+//  =======================================================================
 
 void compute_mean_variance(
     float BRAM_X[EMBED_DIM],
@@ -256,9 +330,10 @@ void compute_mean_variance(
         for(int k = 0; k < 16; k++){
             #pragma HLS UNROLL
             int idx = j + k;
-            float scaled_val = norm_buffer[idx] * scale; 
-            scaled_val = std::max(-128.0f, std::min(127.0f, std::round(scaled_val)));
-            int8_dt q_val = static_cast<int8_dt>(std::round(scaled_val)); 
+
+            float scaled_val = norm_buffer[idx] * scale;
+            float clamped_val = std::max(-128.0f, std::min(127.0f, scaled_val));
+            int8_dt q_val = static_cast<int8_dt>(clamped_val >= 0 ? clamped_val + 0.5f : clamped_val - 0.5f);
             
             int bit_offset = (k % 8) * 8; 
             
@@ -275,6 +350,10 @@ void compute_mean_variance(
     }
     scaler_array[seq_idx] = 1.0f / scale;
 }
+
+//  =======================================================================
+//     layernorm
+//  =======================================================================
 
 void layernorm_compute(
     hls::stream<uint256_dt> &FIFO_X,
@@ -309,6 +388,10 @@ void layernorm_compute(
     }
 }
 
+//  =======================================================================
+//     weight FIFO -> URAM
+//  =======================================================================
+
 void load_Weight_tile_HBM2FIFO(
     uint256_dt *W,
     hls::stream<uint256_dt> &FIFO_W,
@@ -331,6 +414,10 @@ void load_Weight_tile_HBM2FIFO(
     }
 }
 
+//  =======================================================================
+//     bias FIFO -> URAM
+//  =======================================================================
+
 void load_Bias_HBM2BRAM(
     float b[EMBED_DIM],
     float BRAM_b[EMBED_DIM])
@@ -341,6 +428,10 @@ void load_Bias_HBM2BRAM(
         BRAM_b[i] = b[i];
     }
 }
+
+//  =======================================================================
+//     weight FIFO -> URAM
+//  =======================================================================
 
 void load_All_Weights_Parallel(
     hls::stream<uint256_dt> &FIFO_Wq,
@@ -373,6 +464,11 @@ void load_All_Weights_Parallel(
         }
     }
 }
+
+//  =======================================================================
+//     linear QKV top module
+//  =======================================================================
+
 void compute_linear_qkv_one_head(
     int64_dt X_package[SEQ_LEN][EMBED_DIM_package],
     hls::stream<uint256_dt> &FIFO_Wq,
@@ -510,6 +606,9 @@ void compute_linear_qkv_one_head(
     }
 }
 
+//  =======================================================================
+//     layernorm top module
+//  =======================================================================
 
 void do_layernorm_dataflow(
     uint256_dt *x,
@@ -532,6 +631,9 @@ void do_layernorm_dataflow(
     layernorm_compute(FIFO_X, scaler_X, SRAM_gamma, SRAM_beta, X_package);
 }
 
+//  =======================================================================
+//     self attention top module
+//  =======================================================================
 
 void process_attention_one_head_dataflow(
     int64_dt X_package[SEQ_LEN][EMBED_DIM_package],
@@ -539,7 +641,7 @@ void process_attention_one_head_dataflow(
     float SRAM_bq[EMBED_DIM], float SRAM_bk[EMBED_DIM], float SRAM_bv[EMBED_DIM],
     float SRAM_swq[EMBED_DIM], float SRAM_swk[EMBED_DIM], float SRAM_swv[EMBED_DIM],
     float scaler_X[SEQ_LEN],
-    int64_dt URAM_Out[SEQ_LEN][TOTAL_DIM / FP32_PACK],
+    int64_dt URAM_Out[SEQ_LEN][EMBED_DIM / FP32_PACK],
     float global_max[SEQ_LEN],
     int head_idx
 ) {
@@ -577,10 +679,9 @@ void process_attention_one_head_dataflow(
     #pragma HLS STREAM variable=FIFO_Softmax_out depth=200
     #pragma HLS STREAM variable=FIFO_Softmax_scaler_out depth=2
 #endif
-
-    // load_Weight_tile_HBM2FIFO(Wq, FIFO_Wq, head_idx);
-    // load_Weight_tile_HBM2FIFO(Wk, FIFO_Wk, head_idx);
-    // load_Weight_tile_HBM2FIFO(Wv, FIFO_Wv, head_idx);
+    load_Weight_tile_HBM2FIFO(Wq, FIFO_Wq, head_idx);
+    load_Weight_tile_HBM2FIFO(Wk, FIFO_Wk, head_idx);
+    load_Weight_tile_HBM2FIFO(Wv, FIFO_Wv, head_idx);
 
     compute_linear_qkv_one_head(
         X_package, FIFO_Wq, FIFO_Wk, FIFO_Wv,
@@ -607,6 +708,10 @@ void process_attention_one_head_dataflow(
         URAM_Out, global_max, head_idx
     );
 }
+
+//  =======================================================================
+//     quantize QKV
+//  =======================================================================
 
 void qkv_sram_and_quantize(
     hls::stream<float> &FIFO_Q_out, 
@@ -721,6 +826,10 @@ void qkv_sram_and_quantize(
     }
 }
 
+//  =======================================================================
+//     score and softmax
+//  =======================================================================
+
 void compute_score_and_softmax(
     int64_dt URAM_Q[SEQ_LEN][HEAD_DIM / INT8_PACK],         // [197][8]
     int64_dt URAM_K[SEQ_LEN][HEAD_DIM / INT8_PACK],         // [197][8]
@@ -803,6 +912,10 @@ void compute_score_and_softmax(
         }
     }
 }
+
+//  =======================================================================
+//     self attention
+//  =======================================================================
 
 void compute_attention_output_one_head(
     hls::stream<int8_dt> &FIFO_Softmax_out,
@@ -895,10 +1008,14 @@ void compute_attention_output_one_head(
     }
 }
 
+//  =======================================================================
+//     quantize_attention_output
+//  =======================================================================
+
 void quantize_attention_output(
-    int64_dt URAM_Out[SEQ_LEN][TOTAL_DIM / FP32_PACK],       
+    int64_dt URAM_Out[SEQ_LEN][EMBED_DIM / FP32_PACK],       
     float global_max[SEQ_LEN],                               
-    int64_dt URAM_Quant_Out[SEQ_LEN][TOTAL_DIM / INT8_PACK], 
+    int64_dt URAM_Quant_Out[SEQ_LEN][EMBED_DIM / INT8_PACK], 
     float out_scaler[SEQ_LEN]                               
 ) {
     #pragma HLS ARRAY_PARTITION variable=URAM_Out dim=2 type=cyclic factor=4
@@ -914,7 +1031,7 @@ void quantize_attention_output(
         out_scaler[i] = max_val / 127.0f; 
 
         col_quant_loop:
-        for (int j = 0; j < TOTAL_DIM / INT8_PACK; j++) {
+        for (int j = 0; j < EMBED_DIM / INT8_PACK; j++) {
             #pragma HLS PIPELINE II=1
             
             int64_dt packed_int8 = 0;
@@ -945,13 +1062,17 @@ void quantize_attention_output(
     }
 }
 
+//  =======================================================================
+//      Load residual (X in FP32)
+//  =======================================================================
+
 void load_Residual_Tile_HBM2FIFO(
     uint256_dt *HBM_X,         
     hls::stream<uint256_dt> &FIFO_Res,
     int iter                  
 ) {
-    int chunks_per_row = TOTAL_DIM / FP32_PACK; 
-    int chunks_per_tile = TILE_SIZE / FP32_PACK;
+    int chunks_per_row = EMBED_DIM / 8; // 256-bit contains 8 floats
+    int chunks_per_tile = TILE_SIZE / 8;
     int tile_col_offset = iter * chunks_per_tile;
 
     load_res_seq_loop:
@@ -967,31 +1088,62 @@ void load_Residual_Tile_HBM2FIFO(
     }
 }
 
+//  =======================================================================
+//      output projection result
+//  =======================================================================
+
+void store_Final_Tile_FIFO2HBM(
+    hls::stream<uint256_dt> &FIFO_Final_Out,
+    uint256_dt *HBM_Out,
+    int iter
+) {
+    int chunks_per_row = EMBED_DIM / 8; 
+    int chunks_per_tile = TILE_SIZE / 8; 
+    int tile_col_offset = iter * chunks_per_tile;
+
+    store_res_seq_loop:
+    for (int i = 0; i < SEQ_LEN; i++) {
+        int row_start_idx = i * chunks_per_row;
+        
+        store_res_tile_loop:
+        for (int j = 0; j < chunks_per_tile; j++) {
+            #pragma HLS PIPELINE II=1
+            int target_idx = row_start_idx + tile_col_offset + j;
+            HBM_Out[target_idx] = FIFO_Final_Out.read();
+        }
+    }
+}
+
+//  =======================================================================
+//      output projection and residual compute
+//  =======================================================================
+
 void compute_output_proj_and_residual(
-    int64_dt URAM_Quant_Out[SEQ_LEN][TOTAL_DIM / INT8_PACK], 
+    int64_dt URAM_Quant_Out[SEQ_LEN][EMBED_DIM / INT8_PACK], 
     hls::stream<uint256_dt> &FIFO_Wo,                        
     hls::stream<uint256_dt> &FIFO_Res,                       
     hls::stream<uint256_dt> &FIFO_Final_Out,                 
     float out_scaler[SEQ_LEN],                               
-    float BRAM_bo[TOTAL_DIM],                                
-    float scale_wo[TOTAL_DIM],                               
+    float BRAM_bo[EMBED_DIM],                                
+    float scale_wo[EMBED_DIM],                               
     int iter
 ) {
     #pragma HLS INLINE off
 
     #ifdef __SYNTHESIS__
-    int64_dt URAM_Wo[TILE_SIZE][TOTAL_DIM / INT8_PACK];
+    int64_dt URAM_Wo[TILE_SIZE][EMBED_DIM / INT8_PACK];
     #pragma HLS BIND_STORAGE variable=URAM_Wo type=ram_2p impl=uram
     #else
-    static int64_dt URAM_Wo[TILE_SIZE][TOTAL_DIM / INT8_PACK];
+    static int64_dt URAM_Wo[TILE_SIZE][EMBED_DIM / INT8_PACK];
     #endif
 
     #pragma HLS ARRAY_PARTITION variable=URAM_Wo type=cyclic factor=4 dim=2
 
+    // load weight
     load_wo_row:
     for (int i = 0; i < TILE_SIZE; i++) { 
         load_wo_col:
-        for (int j = 0; j < TOTAL_DIM / 32; j++) { 
+        for (int j = 0; j < EMBED_DIM / 32; j++) { 
             #pragma HLS PIPELINE II=4
             uint256_dt wo_chunk = FIFO_Wo.read();
             
@@ -1005,23 +1157,23 @@ void compute_output_proj_and_residual(
         }
     }
 
-    uint256_dt out_chunk = 0; 
-    int32_dt acc = 0;
-
     compute_seq:
     for (int i = 0; i < SEQ_LEN; i++) {
+        
+        int32_dt acc_buffer[TILE_SIZE];
+        #pragma HLS BIND_STORAGE variable=acc_buffer type=ram_2p impl=lutram
+
+        // ====================================================================
+        // MAC
+        // ====================================================================
+        int32_dt acc = 0;
+        
         compute_tile:
         for (int j = 0; j < TILE_SIZE; j++) { 
             dot_product_step:
-            for (int step = 0; step < TOTAL_DIM / 32; step++) {
+            for (int step = 0; step < EMBED_DIM / 32; step++) {
                 #pragma HLS PIPELINE II=1
-                
-                uint256_dt local_out_chunk = out_chunk;
                 int32_dt cycle_acc = 0;
-
-                if (step == 0 && j % 8 == 0) {
-                    local_out_chunk = FIFO_Res.read(); 
-                }
 
                 mac_pack_loop:
                 for (int p = 0; p < 4; p++) {
@@ -1041,80 +1193,97 @@ void compute_output_proj_and_residual(
                     }
                 }
 
-                if (step == 0) {
-                    acc = cycle_acc;
-                } else {
-                    acc += cycle_acc;
+                if (step == 0) acc = cycle_acc;
+                else acc += cycle_acc;
+
+                if (step == (EMBED_DIM / 32) - 1) {
+                    acc_buffer[j] = acc;
                 }
+            }
+        }
 
-                if (step == (TOTAL_DIM / 32) - 1) {
-                    float token_scaler = out_scaler[i];
-                    int weight_idx = iter * TILE_SIZE + j;
-                    float proj_val = (float)acc * token_scaler * scale_wo[weight_idx] + BRAM_bo[weight_idx];
+        // ====================================================================
+        // Dequantize, Residual Addition, and Pack
+        // ====================================================================
+        float token_scaler = out_scaler[i];
+        uint256_dt res_chunk = 0;
+        
+        float pack_array[8]; // Pack into 8 floats (256-bit)
+        #pragma HLS ARRAY_PARTITION variable=pack_array type=complete
 
-                    int res_start_bit = (j % 8) * 32;
-                    int res_end_bit = res_start_bit + 31;
-                    
-                    union FloatInt { float f; uint32_t i; } res_conv, out_conv;
-                    res_conv.i = local_out_chunk.range(res_end_bit, res_start_bit);
-                    
-                    float final_val = proj_val + res_conv.f;
+        post_process_loop:
+        for (int j = 0; j < TILE_SIZE; j++) {
+            #pragma HLS PIPELINE II=1
+            
+            // Read new residual 256-bit chunk every 8 elements
+            if (j % 8 == 0) {
+                res_chunk = FIFO_Res.read();
+            }
 
-                    out_conv.f = final_val;
-                    local_out_chunk.range(res_end_bit, res_start_bit) = out_conv.i;
- 
-                    if ((j % 8 == 7) || (j == TILE_SIZE - 1)) {
-                        FIFO_Final_Out.write(local_out_chunk);
-                    }
+            int32_dt final_acc = acc_buffer[j];
+            int weight_idx = iter * TILE_SIZE + j;
+            
+            float w_scale = scale_wo[weight_idx];
+            float w_bias  = BRAM_bo[weight_idx];
+            float combined_scale = token_scaler * w_scale; 
+            
+            float proj_val = (float)final_acc * combined_scale + w_bias;
+
+            // Extract the matching FP32 value from the residual chunk
+            int res_start_bit = (j % 8) * 32;
+            int res_end_bit = res_start_bit + 31;
+            union { float f; uint32_t i; } res_conv;
+            res_conv.i = res_chunk.range(res_end_bit, res_start_bit);
+            
+            // Add residual
+            pack_array[j % 8] = proj_val + res_conv.f;
+
+            // Write out 256-bit chunk every 8 elements
+            if ((j % 8 == 7) || (j == TILE_SIZE - 1)) {
+                uint256_dt out_chunk = 0;
+                pack_write_loop:
+                for (int k = 0; k < 8; k++) {
+                    #pragma HLS UNROLL
+                    union { float f; uint32_t i; } out_conv;
+                    out_conv.f = pack_array[k];
+                    int out_start = k * 32;
+                    int out_end = out_start + 31;
+                    out_chunk.range(out_end, out_start) = out_conv.i;
                 }
-
-                out_chunk = local_out_chunk;
+                FIFO_Final_Out.write(out_chunk);
             }
         }
     }
 }
 
-void store_Final_Tile_FIFO2HBM(
-    hls::stream<uint256_dt> &FIFO_Final_Out,
-    uint256_dt *HBM_Out,
-    int iter
-) {
-    int chunks_per_row = TOTAL_DIM / FP32_PACK;
-    int chunks_per_tile = TILE_SIZE / FP32_PACK;
-    int tile_col_offset = iter * chunks_per_tile;
-
-    store_res_seq_loop:
-    for (int i = 0; i < SEQ_LEN; i++) {
-        int row_start_idx = i * chunks_per_row;
-        
-        store_res_tile_loop:
-        for (int j = 0; j < chunks_per_tile; j++) {
-            #pragma HLS PIPELINE II=1
-            int target_idx = row_start_idx + tile_col_offset + j;
-            HBM_Out[target_idx] = FIFO_Final_Out.read();
-        }
-    }
-}
+//  =======================================================================
+//     output projection single tile TOP module
+//  =======================================================================
 
 void process_o_proj_single_tile_dataflow(
-    int64_dt URAM_Quant_Out[SEQ_LEN][TOTAL_DIM / INT8_PACK], 
-    uint256_dt *HBM_X_Res,
-    hls::stream<uint256_dt> &FIFO_Wo, 
-    uint256_dt *HBM_Out,
+    int64_dt URAM_Quant_Out[SEQ_LEN][EMBED_DIM / INT8_PACK], 
+    uint256_dt *HBM_Wo,
+    uint256_dt *HBM_X_Res,       
+    uint256_dt *HBM_Out,         
     float out_scaler[SEQ_LEN],   
-    float BRAM_bo[TOTAL_DIM],    
-    float scale_wo[TOTAL_DIM],   
-    int iter
+    float BRAM_bo[EMBED_DIM],    
+    float scale_wo[EMBED_DIM],   
+    int iter                     
 ) {
     #pragma HLS DATAFLOW
+    #pragma HLS INLINE off
 
+    hls::stream<uint256_dt> FIFO_Wo("FIFO_Wo");
     hls::stream<uint256_dt> FIFO_Res("FIFO_Res");
     hls::stream<uint256_dt> FIFO_Final_Out("FIFO_Final_Out");
 
 #ifdef __SYNTHESIS__
+    #pragma HLS STREAM variable=FIFO_Wo depth=32
     #pragma HLS STREAM variable=FIFO_Res depth=32
     #pragma HLS STREAM variable=FIFO_Final_Out depth=32
 #endif
+    
+    load_Weight_tile_HBM2FIFO(HBM_Wo, FIFO_Wo, iter);
 
     load_Residual_Tile_HBM2FIFO(HBM_X_Res, FIFO_Res, iter);
 
@@ -1132,34 +1301,41 @@ void process_o_proj_single_tile_dataflow(
     store_Final_Tile_FIFO2HBM(FIFO_Final_Out, HBM_Out, iter);
 }
 
+//  =======================================================================
+//     output projection TOP module
+//  =======================================================================
+
 void run_full_output_projection(
-    int64_dt URAM_Quant_Out[SEQ_LEN][TOTAL_DIM / INT8_PACK], 
+    int64_dt URAM_Quant_Out[SEQ_LEN][EMBED_DIM / INT8_PACK], 
     uint256_dt *HBM_Wo,          
     uint256_dt *HBM_X_Res,      
     uint256_dt *HBM_Out,         
     float out_scaler[SEQ_LEN],   
-    float BRAM_bo[TOTAL_DIM],    
-    float scale_wo[TOTAL_DIM]
+    float *HBM_bo,
+    float *HBM_scale_wo
 ) {
-    hls::stream<uint256_dt> FIFO_Wo("FIFO_Wo");
-#ifdef __SYNTHESIS__
-    #pragma HLS STREAM variable=FIFO_Wo depth=64
-#endif
+    float SRAM_bo[EMBED_DIM];
+    float SRAM_scale_wo[EMBED_DIM];
+    #pragma HLS ARRAY_PARTITION variable=SRAM_bo type=cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=SRAM_scale_wo type=cyclic factor=8
+    #pragma HLS BIND_STORAGE variable=SRAM_bo type=ram_2p impl=bram
+    #pragma HLS BIND_STORAGE variable=SRAM_scale_wo type=ram_2p impl=bram
 
-    const int NUM_TILES = TOTAL_DIM / TILE_SIZE;
+    load_Bias_HBM2BRAM(HBM_bo, SRAM_bo);
+    load_Bias_HBM2BRAM(HBM_scale_wo, SRAM_scale_wo);
+
+    const int NUM_TILES = EMBED_DIM / TILE_SIZE; // 768 / 64 = 12
 
     full_proj_loop:
     for (int iter = 0; iter < NUM_TILES; iter++) {
-        load_Weight_tile_HBM2FIFO(HBM_Wo, FIFO_Wo, iter);
-
         process_o_proj_single_tile_dataflow(
             URAM_Quant_Out,
+            HBM_Wo,
             HBM_X_Res,
-            FIFO_Wo,
             HBM_Out,
             out_scaler,
-            BRAM_bo,
-            scale_wo,
+            SRAM_bo,
+            SRAM_scale_wo,
             iter
         );
     }
