@@ -375,6 +375,7 @@ void layernorm_compute(
     seq_loop:
     for(int i = 0; i < SEQ_LEN; i++){
         // #pragma HLS DATAFLOW 
+        #pragma HLS LOOP_FLATTEN off
         #pragma HLS stable variable=SRAM_gamma
         #pragma HLS stable variable=SRAM_beta
         #pragma HLS stable variable=scaler
@@ -733,6 +734,8 @@ void qkv_sram_and_quantize(
     // === Step 1: Process Q, K quantization and Buffer V ===
     process_qk_and_buffer_v_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
+        #pragma HLS LOOP_FLATTEN off 
+        
         float local_q[HEAD_DIM];
         float local_k[HEAD_DIM];
         #pragma HLS ARRAY_PARTITION variable=local_q type=complete
@@ -790,6 +793,8 @@ void qkv_sram_and_quantize(
     // === Step 2: V transpose, padding, and packing to URAM ===
     transpose_pad_and_pack_v_loop:
     for (int j = 0; j < HEAD_DIM; j++) {
+        #pragma HLS LOOP_FLATTEN off
+        
         float max_v = 0.0f;
         float local_v_col[SEQ_LEN];
         
@@ -803,6 +808,7 @@ void qkv_sram_and_quantize(
 
         max_v = std::max(max_v, EPSILON);
         float scale_v_val = 127.0f / max_v;
+        
         write_v_transposed_packed_loop:
         for (int i = 0; i < SEQ_LEN_PADDED / INT8_PACK; i++) {
             #pragma HLS PIPELINE II=1
@@ -825,7 +831,6 @@ void qkv_sram_and_quantize(
         scaler_V[j] = 1.0f / scale_v_val;
     }
 }
-
 //  =======================================================================
 //     score and softmax
 //  =======================================================================
@@ -844,23 +849,27 @@ void compute_score_and_softmax(
     
     row_score_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
-        float line_buffer[SEQ_LEN_PADDED];
-        #pragma HLS BIND_STORAGE variable=line_buffer type=ram_2p impl=lutram
+        #pragma HLS LOOP_FLATTEN off
+        
+        float sq_i = scale_Q[i];
+        
+        float score_buffer[SEQ_LEN_PADDED];
+        float exp_buffer[SEQ_LEN_PADDED];
+        #pragma HLS BIND_STORAGE variable=score_buffer type=ram_2p impl=lutram
+        #pragma HLS BIND_STORAGE variable=exp_buffer type=ram_2p impl=lutram
         
         float row_max = NEG_INF;
-        float exp_sum = 0.0f;
-        float sq_i = scale_Q[i];
-
-        col_score_loop:
+        pass1_dot_max:
         for (int k = 0; k < SEQ_LEN_PADDED; k++) {
+            #pragma HLS PIPELINE II=1
             float raw_score = NEG_INF;
 
             if (k < SEQ_LEN) {
                 int32_dt acc = 0;
-
+                
                 dot_product_loop:
                 for (int c = 0; c < HEAD_DIM / INT8_PACK; c += 4) {
-                    #pragma HLS PIPELINE II=1
+                    #pragma HLS UNROLL
                     int32_dt cycle_acc = 0;
 
                     read_unpack_loop:
@@ -882,31 +891,45 @@ void compute_score_and_softmax(
                     }
                     acc += cycle_acc;
                 }
-                
                 raw_score = (float)(acc >> 3) * sq_i * scale_K[k];
             }
 
-            float prev_max = row_max;
-            row_max = std::max(row_max, raw_score);
-            
-            float correction = hls::exp(prev_max - row_max);
-            float current_exp = hls::exp(raw_score - row_max);
-            exp_sum = exp_sum * correction + current_exp;
+            score_buffer[k] = raw_score;
+            if (raw_score > row_max) {
+                row_max = raw_score;
+            }
+        }
 
-            line_buffer[k] = raw_score;
+        float exp_sum = 0.0f;
+        pass2_exp_sum:
+        for (int k = 0; k < SEQ_LEN_PADDED; k++) {
+            #pragma HLS PIPELINE II=1 
+            
+            float score = score_buffer[k];
+            float exp_val = 0.0f;
+            
+            if (k < SEQ_LEN) {
+                exp_val = hls::exp(score - row_max);
+            }
+            
+            exp_buffer[k] = exp_val;
+            exp_sum += exp_val;
         }
 
         float inv_sum = 1.0f / exp_sum; 
-        float row_scaler = inv_sum / 127.0f; //max exp_val == 1 -> factor = 127
+        float row_scaler = inv_sum / 127.0f; 
         FIFO_Softmax_scaler_out.write(row_scaler);
         
-        write_softmax_loop:
+        pass3_quantize_write:
         for (int k = 0; k < SEQ_LEN_PADDED; k++) {
             #pragma HLS PIPELINE II=1
             
-            float score = line_buffer[k];
-            float exp_val = hls::exp(score - row_max);
-            int8_dt q_softmax = (int8_dt)std::round(exp_val * 127.0f);
+            float exp_val = exp_buffer[k];
+            int8_dt q_softmax = 0;
+            
+            if (k < SEQ_LEN) {
+                q_softmax = (int8_dt)std::round(exp_val * 127.0f);
+            }
             
             FIFO_Softmax_out.write(q_softmax);
         }
@@ -932,7 +955,7 @@ void compute_attention_output_one_head(
 
     row_compute_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
-        
+        #pragma HLS LOOP_FLATTEN off
         float softmax_scaler = FIFO_Softmax_scaler_out.read();
 
         int8_dt line_buffer[SEQ_LEN_PADDED];
@@ -950,6 +973,7 @@ void compute_attention_output_one_head(
 
         compute_v_loop:
         for (int c = 0; c < HEAD_DIM; c++) {
+            #pragma HLS LOOP_FLATTEN off
             int32_dt acc = 0;
 
             dot_product_step:
@@ -1016,7 +1040,7 @@ void quantize_attention_output(
     int64_dt URAM_Out[SEQ_LEN][EMBED_DIM / FP32_PACK],       
     float global_max[SEQ_LEN],                               
     int64_dt URAM_Quant_Out[SEQ_LEN][EMBED_DIM / INT8_PACK], 
-    float out_scaler[SEQ_LEN]                               
+    float out_scaler[SEQ_LEN]                                
 ) {
     #pragma HLS ARRAY_PARTITION variable=URAM_Out dim=2 type=cyclic factor=4
     #pragma HLS BIND_STORAGE variable=URAM_Quant_Out type=ram_2p impl=uram
@@ -1024,15 +1048,17 @@ void quantize_attention_output(
 
     row_quant_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
-        
-        float max_val = std::max(global_max[i], EPSILON);
-        float scale = 127.0f / max_val;
-        
-        out_scaler[i] = max_val / 127.0f; 
+        float scale;
 
         col_quant_loop:
         for (int j = 0; j < EMBED_DIM / INT8_PACK; j++) {
             #pragma HLS PIPELINE II=1
+            
+            if (j == 0) {
+                float max_val = std::max(global_max[i], EPSILON);
+                scale = 127.0f / max_val;
+                out_scaler[i] = max_val / 127.0f; 
+            }
             
             int64_dt packed_int8 = 0;
 
@@ -1043,7 +1069,7 @@ void quantize_attention_output(
                 int read_idx = j * 4 + p;
                 int64_dt fp32_pack = URAM_Out[i][read_idx];
 
-                union FloatInt { float f; uint32_t i; } conv0, conv1;
+                union { float f; uint32_t i; } conv0, conv1;
                 conv0.i = fp32_pack.range(31, 0);
                 conv1.i = fp32_pack.range(63, 32);
 
@@ -1159,7 +1185,7 @@ void compute_output_proj_and_residual(
 
     compute_seq:
     for (int i = 0; i < SEQ_LEN; i++) {
-        
+        #pragma HLS LOOP_FLATTEN off
         int32_dt acc_buffer[TILE_SIZE];
         #pragma HLS BIND_STORAGE variable=acc_buffer type=ram_2p impl=lutram
 
