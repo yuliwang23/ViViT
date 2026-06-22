@@ -3,8 +3,7 @@
 // Description:
 //   Testbench that reads all kernel inputs from text files
 //   (produced by gen_input), calls the mlp_q kernel, and compares
-//   the kernel output against a host reference that uses the same
-//   quantized LayerNorm input format as mlp_q.
+//   the kernel output against a fused LayerNorm+MLP host reference.
 //
 //   Expected files in the current working directory:
 //     input.txt          FP32, SEQ_LEN * EMBED_DIM
@@ -99,39 +98,66 @@ static void pack_int8(const std::vector<int>  &q,
     }
 }
 
-static void quantize_input_for_mlp(const std::vector<float> &fp,
-                                   std::vector<uint256_dt> &packed,
-                                   std::vector<float> &scaler,
-                                   std::vector<float> &dequant)
+
+static void pack_fp32(const std::vector<float> &fp,
+                      std::vector<uint256_dt> &packed)
 {
-    packed.assign((SEQ_LEN * EMBED_DIM) / 32, 0);
-    scaler.assign(SEQ_LEN, 1.0f);
-    dequant.assign(SEQ_LEN * EMBED_DIM, 0.0f);
+    packed.assign(fp.size() / 8, 0);
+    for (size_t i = 0; i < packed.size(); i++) {
+        uint256_dt chunk = 0;
+        for (int k = 0; k < 8; k++) {
+            union { float f; uint32_t u; } cv;
+            cv.f = fp[i * 8 + k];
+            int s = k * 32;
+            chunk.range(s + 31, s) = cv.u;
+        }
+        packed[i] = chunk;
+    }
+}
+
+static void layernorm_quant_dequant_ref(
+    const std::vector<float> &input_fp,
+    const std::vector<float> &gamma,
+    const std::vector<float> &beta,
+    std::vector<float>       &input_dequant)
+{
+    input_dequant.assign(SEQ_LEN * EMBED_DIM, 0.0f);
+    std::vector<float> norm_row(EMBED_DIM, 0.0f);
 
     for (int i = 0; i < SEQ_LEN; i++) {
+        float mean = 0.0f;
+        for (int d = 0; d < EMBED_DIM; d++) {
+            mean += input_fp[i * EMBED_DIM + d];
+        }
+        mean *= EMBED_DIM_INV;
+
+        float var = 0.0f;
+        for (int d = 0; d < EMBED_DIM; d++) {
+            float diff = input_fp[i * EMBED_DIM + d] - mean;
+            var += diff * diff;
+        }
+        var *= EMBED_DIM_INV;
+        float inv_std = 1.0f / std::sqrt(var + EPSILON);
+
         float max_val = 0.0f;
         for (int d = 0; d < EMBED_DIM; d++) {
-            max_val = std::max(max_val, std::fabs(fp[i * EMBED_DIM + d]));
+            float v = (input_fp[i * EMBED_DIM + d] - mean) * inv_std * gamma[d] + beta[d];
+            norm_row[d] = v;
+            max_val = std::max(max_val, std::fabs(v));
         }
         if (max_val < EPSILON) max_val = EPSILON;
-        float scale = 127.0f / max_val;
-        scaler[i] = 1.0f / scale;
+        float scale = 127.5f / max_val;
+        float inv_scale = 1.0f / scale;
 
-        for (int j = 0; j < EMBED_DIM / 32; j++) {
-            uint256_dt chunk = 0;
-            for (int k = 0; k < 32; k++) {
-                int d = j * 32 + k;
-                int qi = (int)(fp[i * EMBED_DIM + d] * scale);
-                if (qi >  127) qi =  127;
-                if (qi < -128) qi = -128;
-                int s = k * 8;
-                chunk.range(s + 7, s) = (ap_uint<8>)(uint8_t)(int8_t)qi;
-                dequant[i * EMBED_DIM + d] = (float)qi * scaler[i];
-            }
-            packed[i * (EMBED_DIM / 32) + j] = chunk;
+        for (int d = 0; d < EMBED_DIM; d++) {
+            float scaled = norm_row[d] * scale;
+            scaled = std::max(-128.0f, std::min(127.0f, std::round(scaled)));
+            int qi = (int)std::round(scaled);
+            input_dequant[i * EMBED_DIM + d] = (float)qi * inv_scale;
         }
     }
 }
+
 
 static float gelu_ref(float x)
 {
@@ -266,9 +292,14 @@ int main()
     // 2. Pack inputs into uint256_dt chunks
     //----------------------------------------------------------
     printf("[2] Packing into uint256 chunks ...\n");
-    std::vector<uint256_dt> input_packed, W1_packed, W2_packed;
-    std::vector<float> input_scaler, input_dequant;
-    quantize_input_for_mlp(input_fp, input_packed, input_scaler, input_dequant);
+    std::vector<uint256_dt> input_packed, gamma_packed, beta_packed, W1_packed, W2_packed;
+    std::vector<float> gamma(EMBED_DIM, 1.0f);
+    std::vector<float> beta(EMBED_DIM, 0.0f);
+    std::vector<float> input_dequant;
+    pack_fp32(input_fp, input_packed);
+    pack_fp32(gamma, gamma_packed);
+    pack_fp32(beta, beta_packed);
+    layernorm_quant_dequant_ref(input_fp, gamma, beta, input_dequant);
     pack_int8(W1_q,     W1_packed);
     pack_int8(W2_q,     W2_packed);
 
@@ -287,7 +318,8 @@ int main()
     printf("[3] Calling mlp_q kernel ...\n");
     mlp_q(
         input_packed.data(),
-        input_scaler.data(),
+        gamma_packed.data(),
+        beta_packed.data(),
         W1_packed.data(),
         W2_packed.data(),
         b1.data(),

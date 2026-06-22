@@ -7,31 +7,11 @@
 #define HLS_CSIM_STATIC
 #endif
 
-static void dense0_dataflow_tile(
-    uint256_dt *W1,
-    int64_dt    X_package[SEQ_LEN_PADDED][EMBED_DIM_package],
-    float       scaler_X [SEQ_LEN_PADDED],
-    float       SRAM_b1  [HIDDEN_DIM],
-    float       SRAM_sw1 [HIDDEN_DIM],
-    half_dt     H_full_fp[SEQ_LEN_PADDED][HIDDEN_DIM],
-    float       scaler_H [SEQ_LEN_PADDED],
-    int         iter);
-
-static void dense1_dataflow_tile(
-    uint256_dt *W2,
-    uint256_dt *output,
-    int64_dt    H_package[SEQ_LEN_PADDED][HIDDEN_DIM_package],
-    float       scaler_H [SEQ_LEN_PADDED],
-    float       SRAM_b2  [EMBED_DIM],
-    float       SRAM_sw2 [EMBED_DIM],
-    int         iter,
-    int         token_offset,
-    int         valid_seq_len);
-
 extern "C" {
 void mlp_q(
     uint256_dt *input,
-    float      *input_scaler,
+    uint256_dt *gamma,
+    uint256_dt *beta,
     uint256_dt *W1,
     uint256_dt *W2,
     float      *b1,
@@ -44,8 +24,9 @@ void mlp_q(
 {
 #pragma HLS BIND_STORAGE variable=GELU_LUT type=rom_1p impl=lutram
 
-#pragma HLS INTERFACE m_axi port=input    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=4728
-#pragma HLS INTERFACE m_axi port=input_scaler offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=197
+#pragma HLS INTERFACE m_axi port=input    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=18912
+#pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=96 
+#pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=96 
 #pragma HLS INTERFACE m_axi port=output   offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=18912
 #pragma HLS INTERFACE m_axi port=W1       offset=slave bundle=gmem1 max_widen_bitwidth=256 depth=73728
 #pragma HLS INTERFACE m_axi port=W2       offset=slave bundle=gmem2 max_widen_bitwidth=256 depth=73728
@@ -55,7 +36,8 @@ void mlp_q(
 #pragma HLS INTERFACE m_axi port=scale_w2 offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=768
 
 #pragma HLS INTERFACE s_axilite port=input    bundle=control
-#pragma HLS INTERFACE s_axilite port=input_scaler bundle=control
+#pragma HLS INTERFACE s_axilite port=gamma    bundle=control
+#pragma HLS INTERFACE s_axilite port=beta     bundle=control
 #pragma HLS INTERFACE s_axilite port=output   bundle=control
 #pragma HLS INTERFACE s_axilite port=W1       bundle=control
 #pragma HLS INTERFACE s_axilite port=W2       bundle=control
@@ -66,6 +48,11 @@ void mlp_q(
 #pragma HLS INTERFACE s_axilite port=token_offset bundle=control
 #pragma HLS INTERFACE s_axilite port=valid_seq_len bundle=control
 #pragma HLS INTERFACE s_axilite port=return   bundle=control
+
+    float SRAM_gamma[EMBED_DIM];
+    float SRAM_beta[EMBED_DIM];
+    #pragma HLS ARRAY_PARTITION variable=SRAM_gamma type=cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=SRAM_beta type=cyclic factor=8
 
     HLS_CSIM_STATIC int64_dt X_package[SEQ_LEN_PADDED][EMBED_DIM_package];
     HLS_CSIM_STATIC float    scaler_X [SEQ_LEN_PADDED];
@@ -78,59 +65,34 @@ void mlp_q(
 #pragma HLS ARRAY_PARTITION variable=H_package type=cyclic factor=4 dim=1
 #pragma HLS BIND_STORAGE    variable=H_package type=ram_2p impl=uram
 
-    HLS_CSIM_STATIC half_dt H_full_fp[SEQ_LEN_PADDED][HIDDEN_DIM];
-#pragma HLS BIND_STORAGE    variable=H_full_fp type=ram_2p impl=bram
-#pragma HLS ARRAY_PARTITION variable=H_full_fp dim=2 type=cyclic factor=8
+    HLS_CSIM_STATIC uint128_dt H_full_pack[SEQ_LEN_PADDED][HIDDEN_DIM_package];
+#pragma HLS BIND_STORAGE    variable=H_full_pack type=ram_1p impl=uram
 
     HLS_CSIM_STATIC float SRAM_b1 [HIDDEN_DIM];
     HLS_CSIM_STATIC float SRAM_b2 [EMBED_DIM];
     HLS_CSIM_STATIC float SRAM_sw1[HIDDEN_DIM];
     HLS_CSIM_STATIC float SRAM_sw2[EMBED_DIM];
-#pragma HLS ARRAY_PARTITION variable=SRAM_b1  dim=1 type=cyclic factor=8
 #pragma HLS ARRAY_PARTITION variable=SRAM_b2  dim=1 type=cyclic factor=8
-#pragma HLS ARRAY_PARTITION variable=SRAM_sw1 dim=1 type=cyclic factor=8
 #pragma HLS ARRAY_PARTITION variable=SRAM_sw2 dim=1 type=cyclic factor=8
+
+    load_beta_gamma_HBM2SRAM(gamma, beta, SRAM_gamma, SRAM_beta);
 
     load_Bias_HBM2BRAM(b1,       SRAM_b1,  HIDDEN_DIM);
     load_Bias_HBM2BRAM(b2,       SRAM_b2,  EMBED_DIM );
     load_Bias_HBM2BRAM(scale_w1, SRAM_sw1, HIDDEN_DIM);
     load_Bias_HBM2BRAM(scale_w2, SRAM_sw2, EMBED_DIM );
 
-    const int CHUNKS_PER_ROW = EMBED_DIM / 32;   // = 24
+    do_layernorm_dataflow(input, SRAM_gamma, SRAM_beta, scaler_X, X_package, token_offset, valid_seq_len);
 
-    scaler_load_loop:
-    for (int i = 0; i < SEQ_LEN_PADDED; i++) {
+    pad_clear_loop:
+    for (int i = SEQ_LEN; i < SEQ_LEN_PADDED; i++) {
+#pragma HLS LOOP_FLATTEN off
+        scaler_X[i] = 1.0f;
+
+        clear_x_package:
+        for (int j = 0; j < EMBED_DIM_package; j++) {
 #pragma HLS PIPELINE II=1
-        int  source_token = token_offset + i;
-        bool in_range     = (i < SEQ_LEN);
-        bool valid_token  = in_range && (source_token < valid_seq_len);
-
-        if (valid_token) {
-            scaler_X[i] = input_scaler[source_token];
-        } else {
-            scaler_X[i] = 1.0f;
-        }
-    }
-
-    seq_load_loop:
-    for (int idx = 0; idx < SEQ_LEN_PADDED * CHUNKS_PER_ROW; idx++) {
-#pragma HLS PIPELINE II=1
-        int  i            = idx / CHUNKS_PER_ROW;
-        int  j            = idx % CHUNKS_PER_ROW;
-        int  source_token = token_offset + i;
-        bool in_range     = (i < SEQ_LEN);                   // not a pad row
-        bool valid_token  = in_range && (source_token < valid_seq_len);
-
-        uint256_dt chunk;
-        if (valid_token) {
-            chunk = input[source_token * CHUNKS_PER_ROW + j];
-        } else {
-            chunk = (uint256_dt)0;
-        }
-        for (int k = 0; k < 4; k++) {
-#pragma HLS UNROLL
-            int s = k * 64, e = s + 63;
-            X_package[i][j * 4 + k] = chunk.range(e, s);
+            X_package[i][j] = 0;
         }
     }
 
@@ -141,16 +103,14 @@ void mlp_q(
             W1,
             X_package, scaler_X,
             SRAM_b1, SRAM_sw1,
-            H_full_fp,
+            H_full_pack,
             scaler_H,
             iter);
     }
 
     // Stage 2b:  per-row quantize hidden activation.
-    //   Iterates SEQ_LEN_PADDED rows; rows >= SEQ_LEN are zeros so
-    //   max_val will hit EPSILON floor and the resulting H_package
-    //   rows will be all zero (consistent with valid_token masking
-    //   in store_Output_FIFO2HBM).
+    //   Invalid and padded rows are still drained through dense stages,
+    //   then masked in store_Output_FIFO2HBM.
     quant_hidden_loop:
     for (int i = 0; i < SEQ_LEN_PADDED; i++) {
 #pragma HLS LOOP_FLATTEN off
@@ -163,9 +123,13 @@ void mlp_q(
         for (int j = 0; j < HIDDEN_DIM; j += 8) {
 #pragma HLS PIPELINE II=1
             int64_dt pkg = 0;
+            uint128_dt h_pack = H_full_pack[i][j >> 3];
             for (int k = 0; k < 8; k++) {
 #pragma HLS UNROLL
-                float    f  = (float)H_full_fp[i][j + k] * scale;
+                ap_uint<16> h_bits = h_pack.range(k * 16 + 15, k * 16);
+                half_dt h_val = 0;
+                h_val.range(15, 0) = h_bits;
+                float    f  = (float)h_val * scale;
                 int      qi = (int)((f >= 0.0f) ? (f + 0.5f) : (f - 0.5f));
                 if (qi >  127) qi =  127;
                 if (qi < -128) qi = -128;
@@ -198,7 +162,7 @@ static void dense0_dataflow_tile(
     float       scaler_X [SEQ_LEN_PADDED],
     float       SRAM_b1  [HIDDEN_DIM],
     float       SRAM_sw1 [HIDDEN_DIM],
-    half_dt     H_full_fp[SEQ_LEN_PADDED][HIDDEN_DIM],
+    uint128_dt  H_full_pack[SEQ_LEN_PADDED][HIDDEN_DIM_package],
     float       scaler_H [SEQ_LEN_PADDED],
     int         iter)
 {
@@ -213,7 +177,7 @@ static void dense0_dataflow_tile(
         X_package, scaler_X,
         FIFO_W1,
         SRAM_b1, SRAM_sw1,
-        H_full_fp,
+        H_full_pack,
         scaler_H,
         iter);
 }
@@ -250,12 +214,84 @@ static void dense1_dataflow_tile(
 
 void load_X_HBM2FIFO(
     uint256_dt *HBM_X,
-    hls::stream<uint256_dt> &FIFO_X)
+    hls::stream<uint256_dt> &FIFO_X,
+    int token_offset,
+    int valid_seq_len)
 {
+    const int chunks_per_row = EMBED_DIM / 8;
+
     load_X_loop:
-    for (int i = 0; i < (SEQ_LEN * EMBED_DIM) / 32; i++) {
+    for (int idx = 0; idx < SEQ_LEN * chunks_per_row; idx++) {
 #pragma HLS PIPELINE II=1
-        FIFO_X.write(HBM_X[i]);
+        int i = idx / chunks_per_row;
+        int j = idx % chunks_per_row;
+        int source_token = token_offset + i;
+        bool valid_token = (source_token < valid_seq_len);
+
+        uint256_dt temp_chunk = valid_token ? HBM_X[source_token * chunks_per_row + j] : (uint256_dt)0;
+        FIFO_X.write(temp_chunk);
+    }
+}
+
+void load_X_FIFO2BRAM(
+    hls::stream<uint256_dt> &FIFO_X,
+    float BRAM_X[EMBED_DIM])
+{
+   load_X_col:
+   for (int j = 0; j < EMBED_DIM/8; j++){
+       #pragma HLS PIPELINE II=1
+       
+       uint256_dt temp_chunk = FIFO_X.read();
+       
+       unpack_write_loop:
+       for(int k = 0; k < 8; k++) {
+           #pragma HLS UNROLL 
+           int start_bit = k * 32;
+           int end_bit = start_bit + 31;
+           
+           uint32_t raw_bits = temp_chunk.range(end_bit, start_bit);
+           
+           union {
+               uint32_t i_val;
+               float f_val;
+           } converter;
+           
+           converter.i_val = raw_bits;
+           BRAM_X[j*8+k] = converter.f_val; 
+       }
+   }
+}
+
+void load_beta_gamma_HBM2SRAM(
+    uint256_dt HBM_gamma[EMBED_DIM / 8],
+    uint256_dt HBM_beta[EMBED_DIM / 8],
+    float SRAM_gamma[EMBED_DIM],
+    float SRAM_beta[EMBED_DIM]
+) {
+    #pragma HLS INLINE off
+    load_weights_loop:
+    for (int i = 0; i < EMBED_DIM / 8; i++) {
+        #pragma HLS PIPELINE II=2
+        
+        uint256_dt temp_gamma_chunk = HBM_gamma[i];
+        uint256_dt temp_beta_chunk  = HBM_beta[i];
+        
+        unpack_write_loop:
+        for(int k = 0; k < 8; k++) {
+            #pragma HLS UNROLL 
+            int start_bit = k * 32;
+            int end_bit = start_bit + 31;
+            
+            uint32_t raw_gamma_bits = temp_gamma_chunk.range(end_bit, start_bit);
+            union { uint32_t i_val; float f_val; } conv_gamma;
+            conv_gamma.i_val = raw_gamma_bits;
+            SRAM_gamma[i*8 + k] = conv_gamma.f_val;
+            
+            uint32_t raw_beta_bits = temp_beta_chunk.range(end_bit, start_bit);
+            union { uint32_t i_val; float f_val; } conv_beta;
+            conv_beta.i_val = raw_beta_bits;
+            SRAM_beta[i*8 + k] = conv_beta.f_val;
+        }
     }
 }
 
@@ -286,6 +322,172 @@ void load_Weight_tile_HBM2FIFO(
 #pragma HLS PIPELINE II=1
         FIFO_W.write(W[base_addr_idx + k]);
     }
+}
+
+void compute_mean_variance(
+    float BRAM_X[EMBED_DIM],
+    float gamma[EMBED_DIM],
+    float beta[EMBED_DIM],
+    float scaler_array[SEQ_LEN_PADDED],
+    int64_dt X_package_array[SEQ_LEN_PADDED][EMBED_DIM_package],
+    int seq_idx
+){
+    float global_mean = 0.0f; 
+    float M2AB = 0.0f;
+    float norm_buffer[EMBED_DIM];
+    #pragma HLS INLINE off
+
+    #pragma HLS ARRAY_PARTITION variable=BRAM_X type=cyclic factor=16
+    #pragma HLS ARRAY_PARTITION variable=norm_buffer type=cyclic factor=16
+    #pragma HLS ARRAY_PARTITION variable=gamma type=cyclic factor= 8
+    #pragma HLS ARRAY_PARTITION variable=beta  type=cyclic factor= 8 
+
+    compute_top_loop:
+    for(int j = 0, i = 0; j < EMBED_DIM; j+=16, i++){     
+        #pragma HLS PIPELINE II = 6
+        float local_sum = 0.0f;
+        float local_sum_sq = 0.0f;
+        compute_local_sum:
+        for(int k = 0; k < 16; k++){
+            #pragma HLS UNROLL
+            float val = BRAM_X[j+k];
+            local_sum += val;
+            local_sum_sq += val * val;
+        }
+        float X_b_mean = local_sum * 0.0625f; 
+        float mean_diff = X_b_mean - global_mean;
+        float M_2_B = local_sum_sq - (local_sum * X_b_mean);
+        float mean_diff_sq = mean_diff * mean_diff;
+        float mean_diff_mul_table_val = MEAN_WT[i] * mean_diff;
+        float mean_diff_sq_mul_table_val = M2_WT[i] * mean_diff_sq;
+        global_mean = mean_diff_mul_table_val + global_mean;
+        M2AB = mean_diff_sq_mul_table_val + M_2_B + M2AB;
+    }
+    
+    float var = M2AB * EMBED_DIM_INV; 
+    float inv_std_out = 1.0f / std::sqrt(var + EPSILON); 
+    float max_val = 0.0f;
+    
+    compute_norm_and_find_max_loop:
+    for(int j = 0; j < EMBED_DIM; j+=16){
+        #pragma HLS PIPELINE II=1
+        float local_max = 0.0f;
+        
+        for(int k = 0; k < 16; k++){
+            #pragma HLS UNROLL
+            int idx = j + k;
+            float norm_val = (BRAM_X[idx] - global_mean) * inv_std_out * gamma[idx] + beta[idx];
+            
+            norm_buffer[idx] = norm_val;
+            
+            float abs_val = std::abs(norm_val);
+            local_max = std::max(local_max, abs_val);
+        }
+        max_val = std::max(max_val, local_max);
+    }
+    
+    max_val = std::max(max_val, EPSILON);
+    float scale = 127.5f / max_val;
+    
+    quant_loop:
+    for(int j = 0; j < EMBED_DIM; j+=16){
+        #pragma HLS PIPELINE II=1
+        
+        int64_dt chunk0 = 0; 
+        int64_dt chunk1 = 0;
+
+        pack_loop:
+        for(int k = 0; k < 16; k++){
+            #pragma HLS UNROLL
+            int idx = j + k;
+            float scaled_val = norm_buffer[idx] * scale; 
+            scaled_val = std::max(-128.0f, std::min(127.0f, std::round(scaled_val)));
+            int8_dt q_val = static_cast<int8_dt>(std::round(scaled_val)); 
+            
+            int bit_offset = (k % 8) * 8; 
+            
+            if (k < 8) {
+                chunk0.range(bit_offset + 7, bit_offset) = q_val;
+            } else {
+                chunk1.range(bit_offset + 7, bit_offset) = q_val;
+            }
+        }
+        
+        int pkg_idx = j >> 3; 
+        X_package_array[seq_idx][pkg_idx]     = chunk0;
+        X_package_array[seq_idx][pkg_idx + 1] = chunk1;
+    }
+    scaler_array[seq_idx] = 1.0f / scale;
+}
+
+void layernorm_compute(
+    hls::stream<uint256_dt> &FIFO_X,
+    float scaler[SEQ_LEN_PADDED],
+    float SRAM_gamma[EMBED_DIM],
+    float SRAM_beta[EMBED_DIM],
+    int64_dt X_package[SEQ_LEN_PADDED][EMBED_DIM_package],
+    int token_offset,
+    int valid_seq_len)
+{
+    #pragma HLS INLINE off
+
+    #pragma HLS ARRAY_PARTITION variable=SRAM_gamma type=cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=SRAM_beta type=cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=X_package type=cyclic factor=2 dim=2
+    
+    #pragma HLS BIND_STORAGE variable=SRAM_gamma type=ram_2p impl=bram
+    #pragma HLS BIND_STORAGE variable=SRAM_beta type=ram_2p impl=bram
+    #pragma HLS BIND_STORAGE variable=X_package type=ram_2p impl=bram
+
+    seq_loop:
+    for(int i = 0; i < SEQ_LEN; i++){
+        // #pragma HLS DATAFLOW
+        #pragma HLS stable variable=SRAM_gamma
+        #pragma HLS stable variable=SRAM_beta
+        #pragma HLS stable variable=scaler
+        #pragma HLS stable variable=X_package
+
+        float SRAM_X[EMBED_DIM];
+        #pragma HLS ARRAY_PARTITION variable=SRAM_X type=cyclic factor=16
+        #pragma HLS BIND_STORAGE variable=SRAM_X type=ram_2p impl=bram
+        load_X_FIFO2BRAM(FIFO_X, SRAM_X);
+
+        int source_token = token_offset + i;
+        bool valid_token = (source_token < valid_seq_len);
+        if (valid_token) {
+            compute_mean_variance(SRAM_X, SRAM_gamma, SRAM_beta, scaler, X_package, i);
+        } else {
+            scaler[i] = 1.0f;
+            clear_invalid_x_package:
+            for (int j = 0; j < EMBED_DIM_package; j++) {
+#pragma HLS PIPELINE II=1
+                X_package[i][j] = 0;
+            }
+        }
+    }
+}
+
+void do_layernorm_dataflow(
+    uint256_dt *x,
+    float SRAM_gamma[EMBED_DIM],
+    float SRAM_beta[EMBED_DIM],
+    float scaler_X[SEQ_LEN_PADDED],
+    int64_dt X_package[SEQ_LEN_PADDED][EMBED_DIM_package],
+    int token_offset,
+    int valid_seq_len
+) {
+    
+    #pragma HLS DATAFLOW
+    hls::stream<uint256_dt> FIFO_X("FIFO_X");
+#ifdef __SYNTHESIS__
+    #pragma HLS STREAM variable=FIFO_X depth=32
+#endif
+    #pragma HLS stable variable=SRAM_gamma
+    #pragma HLS stable variable=SRAM_beta
+    #pragma HLS stable variable=scaler_X
+    #pragma HLS stable variable=X_package
+    load_X_HBM2FIFO(x, FIFO_X, token_offset, valid_seq_len);
+    layernorm_compute(FIFO_X, scaler_X, SRAM_gamma, SRAM_beta, X_package, token_offset, valid_seq_len);
 }
 
 void quantize_row_dynamic(
@@ -349,15 +551,15 @@ void dense0_one_tile(
     hls::stream<uint256_dt> &FIFO_W1,
     float     SRAM_b1   [HIDDEN_DIM],
     float     SRAM_sw1  [HIDDEN_DIM],
-    half_dt   H_full_fp [SEQ_LEN_PADDED][HIDDEN_DIM],
+    uint128_dt H_full_pack[SEQ_LEN_PADDED][HIDDEN_DIM_package],
     float     scaler_H  [SEQ_LEN_PADDED],
     int       tile_idx)
 {
 #pragma HLS INLINE off
-    HLS_CSIM_STATIC int64_dt URAM_W[TILE_SIZE][EMBED_DIM_package];
-#pragma HLS ARRAY_PARTITION variable=URAM_W complete dim=1
-#pragma HLS ARRAY_PARTITION variable=URAM_W cyclic factor=4 dim=2
-#pragma HLS BIND_STORAGE    variable=URAM_W type=ram_2p impl=bram
+    HLS_CSIM_STATIC int64_dt W_tile[TILE_SIZE][EMBED_DIM_package];
+#pragma HLS ARRAY_PARTITION variable=W_tile complete dim=1
+#pragma HLS ARRAY_PARTITION variable=W_tile cyclic factor=4 dim=2
+#pragma HLS BIND_STORAGE    variable=W_tile type=ram_1p impl=lutram
 
     int total_chunks = TILE_SIZE * (EMBED_DIM / 32);
     load_W_flat:
@@ -368,7 +570,7 @@ void dense0_one_tile(
         int jb = (k % (EMBED_DIM / 32)) * 4;
         for (int m = 0; m < 4; m++) {
 #pragma HLS UNROLL
-            URAM_W[i][jb + m] = chunk.range(m*64+63, m*64);
+            W_tile[i][jb + m] = chunk.range(m*64+63, m*64);
         }
     }
 
@@ -403,7 +605,7 @@ void dense0_one_tile(
             mac_outputs:
             for (int t = 0; t < TILE_SIZE; t++) {
 #pragma HLS UNROLL
-                int64_dt wp = URAM_W[t][k];
+                int64_dt wp = W_tile[t][k];
 
                 for (int it = 0; it < TOKEN_TILE; it++) {
 #pragma HLS UNROLL
@@ -429,6 +631,8 @@ void dense0_one_tile(
             float h_tile[TILE_SIZE];
 #pragma HLS ARRAY_PARTITION variable=h_tile complete
 
+            uint128_dt h_pack = 0;
+
             gelu_loop:
             for (int t = 0; t < TILE_SIZE; t++) {
 #pragma HLS PIPELINE II=1
@@ -437,7 +641,14 @@ void dense0_one_tile(
                 float dequant        = (float)acc_reg[it][t] * combined_scale;
                 float biased         = dequant + SRAM_b1[col];
                 float activated      = gelu_lut_lookup(biased);
-                H_full_fp[i][col]    = activated;
+                half_dt activated_half = (half_dt)activated;
+                int lane = t & 7;
+                ap_uint<16> h_bits = activated_half.range(15, 0);
+                h_pack.range(lane * 16 + 15, lane * 16) = h_bits;
+                if (lane == 7) {
+                    H_full_pack[i][col >> 3] = h_pack;
+                    h_pack = 0;
+                }
                 h_tile[t]            = activated;
             }
 
@@ -484,10 +695,10 @@ void dense1_one_tile(
 {
 #pragma HLS INLINE off
 
-    HLS_CSIM_STATIC int64_dt URAM_W[TILE_SIZE][HIDDEN_DIM_package];
-#pragma HLS ARRAY_PARTITION variable=URAM_W complete dim=1
-#pragma HLS ARRAY_PARTITION variable=URAM_W cyclic factor=4 dim=2
-#pragma HLS BIND_STORAGE    variable=URAM_W type=ram_2p impl=uram
+    HLS_CSIM_STATIC int64_dt W_tile[TILE_SIZE][HIDDEN_DIM_package];
+#pragma HLS ARRAY_PARTITION variable=W_tile complete dim=1
+#pragma HLS ARRAY_PARTITION variable=W_tile cyclic factor=4 dim=2
+#pragma HLS BIND_STORAGE    variable=W_tile type=ram_1p impl=lutram
 
     int total_chunks = TILE_SIZE * (HIDDEN_DIM / 32);
     load_W_flat:
@@ -498,7 +709,7 @@ void dense1_one_tile(
         int jb = (k % (HIDDEN_DIM / 32)) * 4;
         for (int m = 0; m < 4; m++) {
 #pragma HLS UNROLL
-            URAM_W[i][jb + m] = chunk.range(m*64+63, m*64);
+            W_tile[i][jb + m] = chunk.range(m*64+63, m*64);
         }
     }
 
@@ -531,7 +742,7 @@ void dense1_one_tile(
             mac_outputs:
             for (int t = 0; t < TILE_SIZE; t++) {
 #pragma HLS UNROLL
-                int64_dt wp = URAM_W[t][k];
+                int64_dt wp = W_tile[t][k];
 
                 for (int it = 0; it < TOKEN_TILE; it++) {
 #pragma HLS UNROLL
