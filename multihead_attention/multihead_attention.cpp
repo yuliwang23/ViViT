@@ -1,5 +1,6 @@
 #include "multihead_attention.h"
 
+
 extern "C"{
 void multihead_attention(
     // Input Feature Map (Used for both LayerNorm and Residual)
@@ -261,69 +262,45 @@ void compute_mean_variance(
     int64_dt X_package_array[SEQ_LEN][EMBED_DIM_package],
     int seq_idx
 ){
+    float global_mean = 0.0f; 
+    float M2AB = 0.0f;
+    float norm_buffer[EMBED_DIM];
     #pragma HLS INLINE off
 
     #pragma HLS ARRAY_PARTITION variable=BRAM_X type=cyclic factor=16
-    #pragma HLS ARRAY_PARTITION variable=gamma  type=cyclic factor=8
-    #pragma HLS ARRAY_PARTITION variable=beta   type=cyclic factor=8 
-    
-    // Local buffer to store normalized fp32 results before quantization
-    float norm_buffer[EMBED_DIM];
     #pragma HLS ARRAY_PARTITION variable=norm_buffer type=cyclic factor=16
+    #pragma HLS ARRAY_PARTITION variable=gamma type=cyclic factor= 8
+    #pragma HLS ARRAY_PARTITION variable=beta  type=cyclic factor= 8 
 
-    // ========================================================================
-    // Pass 1: Compute Global Mean (Summation)
-    // ========================================================================
-    float sum = 0.0f;
-    compute_mean_loop:
-    for(int j = 0; j < EMBED_DIM; j+=16){      
-        // Relaxed II for stable floating-point accumulation
-        #pragma HLS PIPELINE II=4 
+    compute_top_loop:
+    for(int j = 0, i = 0; j < EMBED_DIM; j+=16, i++){     
+        #pragma HLS PIPELINE II = 6
         float local_sum = 0.0f;
-        
+        float local_sum_sq = 0.0f;
         compute_local_sum:
         for(int k = 0; k < 16; k++){
             #pragma HLS UNROLL
-            local_sum += BRAM_X[j+k];
+            float val = BRAM_X[j+k];
+            local_sum += val;
+            local_sum_sq += val * val;
         }
-        sum += local_sum;
-    }
-    float global_mean = sum * EMBED_DIM_INV;
-
-    // ========================================================================
-    // Pass 2: Compute Variance (Sum of Squared Differences)
-    // ========================================================================
-    float sq_diff_sum = 0.0f;
-    compute_var_loop:
-    for(int j = 0; j < EMBED_DIM; j+=16){
-        // Relaxed II for stable floating-point accumulation
-        #pragma HLS PIPELINE II=4 
-        float local_sq_diff_sum = 0.0f;
-        
-        compute_local_sq_diff:
-        for(int k = 0; k < 16; k++){
-            #pragma HLS UNROLL
-            float diff = BRAM_X[j+k] - global_mean;
-            local_sq_diff_sum += diff * diff;
-        }
-        sq_diff_sum += local_sq_diff_sum;
+        float X_b_mean = local_sum * 0.0625f; 
+        float mean_diff = X_b_mean - global_mean;
+        float M_2_B = local_sum_sq - (local_sum * X_b_mean);
+        float mean_diff_sq = mean_diff * mean_diff;
+        float mean_diff_mul_table_val = MEAN_WT[i] * mean_diff;
+        float mean_diff_sq_mul_table_val = M2_WT[i] * mean_diff_sq;
+        global_mean = mean_diff_mul_table_val + global_mean;
+        M2AB = mean_diff_sq_mul_table_val + M_2_B + M2AB;
     }
     
-    // Variance and Inverse Standard Deviation
-    float var = sq_diff_sum * EMBED_DIM_INV; 
-    // Extra safety guard against extreme precision loss giving negative variance
-    float safe_var = std::max(0.0f, var); 
-    float inv_std_out = 1.0f / std::sqrt(safe_var + EPSILON); 
-
-    // ========================================================================
-    // Pass 3: Normalize and Find Max Absolute Value
-    // ========================================================================
+    float var = M2AB * EMBED_DIM_INV; 
+    float inv_std_out = 1.0f / std::sqrt(var + EPSILON); 
     float max_val = 0.0f;
+    
     compute_norm_and_find_max_loop:
     for(int j = 0; j < EMBED_DIM; j+=16){
-        // Set II=2 because gamma and beta are only partitioned by 8, 
-        // but we are trying to read 16 elements per iteration.
-        #pragma HLS PIPELINE II=2 
+        #pragma HLS PIPELINE II=1
         float local_max = 0.0f;
         
         for(int k = 0; k < 16; k++){
@@ -340,12 +317,8 @@ void compute_mean_variance(
     }
     
     max_val = std::max(max_val, EPSILON);
-    // Use 127.0f instead of 127.5f to prevent integer clipping at the maximum value bounds
     float scale = 127.5f / max_val;
     
-    // ========================================================================
-    // Pass 4: Quantize and Pack
-    // ========================================================================
     quant_loop:
     for(int j = 0; j < EMBED_DIM; j+=16){
         #pragma HLS PIPELINE II=1
@@ -358,10 +331,9 @@ void compute_mean_variance(
             #pragma HLS UNROLL
             int idx = j + k;
 
-            // Safe Quantization Logic
             float scaled_val = norm_buffer[idx] * scale;
-            int32_t q_int = static_cast<int32_t>(scaled_val >= 0 ? scaled_val + 0.5f : scaled_val - 0.5f);
-            int8_dt q_val = static_cast<int8_dt>(std::max(-128, std::min(127, q_int)));
+            float clamped_val = std::max(-128.0f, std::min(127.0f, scaled_val));
+            int8_dt q_val = static_cast<int8_dt>(clamped_val >= 0 ? clamped_val + 0.5f : clamped_val - 0.5f);
             
             int bit_offset = (k % 8) * 8; 
             
@@ -372,7 +344,6 @@ void compute_mean_variance(
             }
         }
         
-        // Write out 2 packed chunks (16 int8s total) to URAM
         int pkg_idx = j >> 3; 
         X_package_array[seq_idx][pkg_idx]     = chunk0;
         X_package_array[seq_idx][pkg_idx + 1] = chunk1;
@@ -706,7 +677,7 @@ void process_attention_one_head_dataflow(
     #pragma HLS STREAM variable=FIFO_Q_out depth=32
     #pragma HLS STREAM variable=FIFO_K_out depth=32
     #pragma HLS STREAM variable=FIFO_V_out depth=32
-    #pragma HLS STREAM variable=FIFO_Softmax_out depth=40000
+    #pragma HLS STREAM variable=FIFO_Softmax_out depth=200
     #pragma HLS STREAM variable=FIFO_Softmax_scaler_out depth=2
 #endif
     load_Weight_tile_HBM2FIFO(Wq, FIFO_Wq, head_idx);
@@ -790,8 +761,8 @@ void qkv_sram_and_quantize(
 
         max_q = std::max(max_q, EPSILON);
         max_k = std::max(max_k, EPSILON);
-        float scale_q_val = 127.5f / max_q;
-        float scale_k_val = 127.5f / max_k;
+        float scale_q_val = 127.0f / max_q;
+        float scale_k_val = 127.0f / max_k;
 
         pack_and_write_qk_loop:
         for (int j = 0; j < HEAD_DIM / INT8_PACK; j++) {
@@ -803,14 +774,8 @@ void qkv_sram_and_quantize(
                 #pragma HLS UNROLL
                 int idx = j * INT8_PACK + k;
                 
-                // Safe Quantization Logic
-                float scaled_q = local_q[idx] * scale_q_val;
-                float scaled_k = local_k[idx] * scale_k_val;
-                int32_t q_int = static_cast<int32_t>(scaled_q >= 0 ? scaled_q + 0.5f : scaled_q - 0.5f);
-                int32_t k_int = static_cast<int32_t>(scaled_k >= 0 ? scaled_k + 0.5f : scaled_k - 0.5f);
-                
-                int8_dt q_val = static_cast<int8_dt>(std::max(-128, std::min(127, q_int)));
-                int8_dt k_val = static_cast<int8_dt>(std::max(-128, std::min(127, k_int)));
+                int8_dt q_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, local_q[idx] * scale_q_val)));
+                int8_dt k_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, local_k[idx] * scale_k_val)));
                 
                 int start_bit = k * 8;
                 int end_bit = start_bit + 7;
@@ -842,7 +807,7 @@ void qkv_sram_and_quantize(
         }
 
         max_v = std::max(max_v, EPSILON);
-        float scale_v_val = 127.5f / max_v;
+        float scale_v_val = 127.0f / max_v;
         
         write_v_transposed_packed_loop:
         for (int i = 0; i < SEQ_LEN_PADDED / INT8_PACK; i++) {
@@ -854,10 +819,7 @@ void qkv_sram_and_quantize(
                 int orig_idx = i * INT8_PACK + k;
                 int8_dt v_val = 0;
                 if (orig_idx < SEQ_LEN) {
-                    // Safe Quantization Logic
-                    float scaled_v = local_v_col[orig_idx] * scale_v_val;
-                    int32_t v_int = static_cast<int32_t>(scaled_v >= 0 ? scaled_v + 0.5f : scaled_v - 0.5f);
-                    v_val = static_cast<int8_dt>(std::max(-128, std::min(127, v_int)));
+                    v_val = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, local_v_col[orig_idx] * scale_v_val)));
                 }
 
                 int start_bit = k * 8;
@@ -929,7 +891,7 @@ void compute_score_and_softmax(
                     }
                     acc += cycle_acc;
                 }
-                raw_score = static_cast<float>(acc) * 0.125f * sq_i * scale_K[k];
+                raw_score = (float)(acc >> 3) * sq_i * scale_K[k];
             }
 
             score_buffer[k] = raw_score;
@@ -954,9 +916,8 @@ void compute_score_and_softmax(
             exp_sum += exp_val;
         }
 
-        float safe_exp_sum = std::max(exp_sum, 1e-12f);
-        float inv_sum = 1.0f / safe_exp_sum;
-        float row_scaler = inv_sum / 127.5f; 
+        float inv_sum = 1.0f / exp_sum; 
+        float row_scaler = inv_sum / 127.0f; 
         FIFO_Softmax_scaler_out.write(row_scaler);
         
         pass3_quantize_write:
@@ -967,9 +928,7 @@ void compute_score_and_softmax(
             int8_dt q_softmax = 0;
             
             if (k < SEQ_LEN) {
-                // Safe Quantization Logic for Softmax (positive values)
-                int32_t s_int = static_cast<int32_t>(exp_val * 127.5f + 0.5f);
-                q_softmax = static_cast<int8_dt>(std::max(0, std::min(127, s_int)));
+                q_softmax = (int8_dt)std::round(exp_val * 127.0f);
             }
             
             FIFO_Softmax_out.write(q_softmax);
@@ -1078,7 +1037,7 @@ void compute_attention_output_one_head(
 //  =======================================================================
 
 void quantize_attention_output(
-    int64_dt URAM_Out[SEQ_LEN][EMBED_DIM / FP32_PACK],        
+    int64_dt URAM_Out[SEQ_LEN][EMBED_DIM / FP32_PACK],       
     float global_max[SEQ_LEN],                               
     int64_dt URAM_Quant_Out[SEQ_LEN][EMBED_DIM / INT8_PACK], 
     float out_scaler[SEQ_LEN]                                
@@ -1097,8 +1056,8 @@ void quantize_attention_output(
             
             if (j == 0) {
                 float max_val = std::max(global_max[i], EPSILON);
-                scale = 127.5f / max_val;
-                out_scaler[i] = max_val / 127.5f; 
+                scale = 127.0f / max_val;
+                out_scaler[i] = max_val / 127.0f; 
             }
             
             int64_dt packed_int8 = 0;
@@ -1114,15 +1073,8 @@ void quantize_attention_output(
                 conv0.i = fp32_pack.range(31, 0);
                 conv1.i = fp32_pack.range(63, 32);
 
-                // Safe Quantization Logic
-                float scaled_out0 = conv0.f * scale;
-                float scaled_out1 = conv1.f * scale;
-                
-                int32_t out0_int = static_cast<int32_t>(scaled_out0 >= 0 ? scaled_out0 + 0.5f : scaled_out0 - 0.5f);
-                int32_t out1_int = static_cast<int32_t>(scaled_out1 >= 0 ? scaled_out1 + 0.5f : scaled_out1 - 0.5f);
-                
-                int8_dt q0 = static_cast<int8_dt>(std::max(-128, std::min(127, out0_int)));
-                int8_dt q1 = static_cast<int8_dt>(std::max(-128, std::min(127, out1_int)));
+                int8_dt q0 = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, conv0.f * scale)));
+                int8_dt q1 = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, conv1.f * scale)));
 
                 int start_bit_0 = (p * 2) * 8;
                 int start_bit_1 = (p * 2 + 1) * 8;
@@ -1143,7 +1095,7 @@ void quantize_attention_output(
 void load_Residual_Tile_HBM2FIFO(
     uint256_dt *HBM_X,         
     hls::stream<uint256_dt> &FIFO_Res,
-    int iter                 
+    int iter                  
 ) {
     int chunks_per_row = EMBED_DIM / 8; // 256-bit contains 8 floats
     int chunks_per_tile = TILE_SIZE / 8;
