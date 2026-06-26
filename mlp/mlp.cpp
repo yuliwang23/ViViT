@@ -1,5 +1,5 @@
 #include "mlp.h"
-#include "gelu_lut.h"
+#include "fast_math.h"
 
 #ifndef __SYNTHESIS__
 #define HLS_CSIM_STATIC static
@@ -22,7 +22,6 @@ void mlp_q(
     int         token_offset,
     int         valid_seq_len)
 {
-#pragma HLS BIND_STORAGE variable=GELU_LUT type=rom_1p impl=lutram
 
 #pragma HLS INTERFACE m_axi port=input    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=18912
 #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem0 max_widen_bitwidth=256 depth=96 
@@ -96,7 +95,6 @@ void mlp_q(
         }
     }
 
-    // Stage 2:  Dense_0 + GELU + (running-max + stash)
     dense0_tile_loop:
     for (int iter = 0; iter < HIDDEN_DIM / TILE_SIZE; iter++) {
         dense0_dataflow_tile(
@@ -108,9 +106,6 @@ void mlp_q(
             iter);
     }
 
-    // Stage 2b:  per-row quantize hidden activation.
-    //   Invalid and padded rows are still drained through dense stages,
-    //   then masked in store_Output_FIFO2HBM.
     quant_hidden_loop:
     for (int i = 0; i < SEQ_LEN_PADDED; i++) {
 #pragma HLS LOOP_FLATTEN off
@@ -142,7 +137,6 @@ void mlp_q(
         scaler_H[i] = inv_sc;
     }
 
-    // Stage 3:  Dense_1 + dequant + bias
     dense1_tile_loop:
     for (int iter = 0; iter < EMBED_DIM / TILE_SIZE; iter++) {
         dense1_dataflow_tile(
@@ -441,7 +435,6 @@ void layernorm_compute(
 
     seq_loop:
     for(int i = 0; i < SEQ_LEN; i++){
-        // #pragma HLS DATAFLOW
         #pragma HLS stable variable=SRAM_gamma
         #pragma HLS stable variable=SRAM_beta
         #pragma HLS stable variable=scaler
@@ -476,7 +469,6 @@ void do_layernorm_dataflow(
     int token_offset,
     int valid_seq_len
 ) {
-    
     #pragma HLS DATAFLOW
     hls::stream<uint256_dt> FIFO_X("FIFO_X");
 #ifdef __SYNTHESIS__
@@ -640,7 +632,7 @@ void dense0_one_tile(
                 float combined_scale = s_row * SRAM_sw1[col];
                 float dequant        = (float)acc_reg[it][t] * combined_scale;
                 float biased         = dequant + SRAM_b1[col];
-                float activated      = gelu_lut_lookup(biased);
+                float activated      = gelu_approx_top(biased);  // ??? ?��??��??
                 half_dt activated_half = (half_dt)activated;
                 int lane = t & 7;
                 ap_uint<16> h_bits = activated_half.range(15, 0);
@@ -807,29 +799,11 @@ void store_Output_FIFO2HBM(
         store_tile:
         for (int j = 0; j < chunks_per_tile; j++) {
 #pragma HLS PIPELINE II=1
-            uint256_dt chunk = FIFO_OUT.read();   // always drain
+            uint256_dt chunk = FIFO_OUT.read();
             if (valid_token) {
                 int idx = source_token * chunks_per_row + tile_offset + j;
                 output[idx] = chunk;
             }
         }
     }
-}
-
-float gelu_lut_lookup(float x)
-{
-#pragma HLS INLINE
-    if (x <= GELU_X_MIN) return 0.0f;
-    if (x >= GELU_X_MAX) return x;
-
-    float pos  = (x - GELU_X_MIN) * GELU_INV_STEP;
-    int   idx  = (int)pos;
-    float frac = pos - (float)idx;
-
-    if (idx < 0)               idx = 0;
-    if (idx > GELU_LUT_SIZE-1) idx = GELU_LUT_SIZE - 1;
-
-    float y0 = GELU_LUT[idx];
-    float y1 = GELU_LUT[idx + 1];
-    return y0 + frac * (y1 - y0);
 }

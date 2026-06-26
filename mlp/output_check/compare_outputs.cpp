@@ -54,7 +54,8 @@ static bool read_floats(const std::string &path,
 
 int main(int argc, char **argv)
 {
-    const char *out_path    = (argc >= 2) ? argv[1] : "output.txt";
+    //const char *out_path    = (argc >= 2) ? argv[1] : "output.txt";
+    const char *out_path    = (argc >= 2) ? argv[1] : "output_sigmoid.txt";
     const char *golden_path = (argc >= 3) ? argv[2] : "golden_output.txt";
 
     const size_t EXPECTED = (size_t)SEQ_LEN * EMBED_DIM;
