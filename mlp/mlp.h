@@ -33,11 +33,6 @@ typedef ap_fixed<16, 8> half_dt;
 // Tile size on the *output-feature* dimension (rows of W^T we compute per pass)
 #define TILE_SIZE 32
 
-#define GELU_LUT_SIZE 512
-#define GELU_X_MIN (-8.0f)
-#define GELU_X_MAX (8.0f)
-#define GELU_INV_STEP ((float)GELU_LUT_SIZE / (GELU_X_MAX - GELU_X_MIN))
-
 #define EPSILON 1e-5f
 #define EMBED_DIM_INV (1.0f / (float)EMBED_DIM)
 #define HIDDEN_DIM_INV (1.0f / (float)HIDDEN_DIM)
@@ -137,9 +132,8 @@ void load_Weight_tile_HBM2FIFO(
     uint256_dt *W,
     hls::stream<uint256_dt> &FIFO_W,
     int row_offset,
-    int K_dim); // = inner-dim of this matmul
+    int K_dim);
 
-// Quantize one FP32 row -> int8 packed; returns dequant scaler (= 1/scale).
 void quantize_row_dynamic(
     float row_fp[],
     int64_dt row_pkg[],
@@ -192,8 +186,5 @@ void store_Output_FIFO2HBM(
     int tile_idx,
     int token_offset,
     int valid_seq_len);
-
-// LUT lookup with linear interpolation
-float gelu_lut_lookup(float x);
 
 #endif
