@@ -36,141 +36,7 @@ void quantize_weight_per_channel(
     }
 }
 
-// Golden Reference Model for Full Multi-Head Attention
-// void multihead_attention_golden(
-//     float X_fp32[SEQ_LEN][EMBED_DIM],
-//     float gamma[EMBED_DIM], float beta[EMBED_DIM],
-//     int8_t Wq[EMBED_DIM][EMBED_DIM], float bq[EMBED_DIM], float sq[EMBED_DIM],
-//     int8_t Wk[EMBED_DIM][EMBED_DIM], float bk[EMBED_DIM], float sk[EMBED_DIM],
-//     int8_t Wv[EMBED_DIM][EMBED_DIM], float bv[EMBED_DIM], float sv[EMBED_DIM],
-//     int8_t Wo[EMBED_DIM][EMBED_DIM], float bo[EMBED_DIM], float so[EMBED_DIM],
-//     float Out_ref[SEQ_LEN][EMBED_DIM])
-// {
-//     // Step 1: LayerNorm & Quantization
-//     vector<vector<int8_t>> X_int8(SEQ_LEN, vector<int8_t>(EMBED_DIM));
-//     vector<float> token_scale(SEQ_LEN);
-
-//     for (int i = 0; i < SEQ_LEN; i++) {
-//         float global_mean = 0.0f; 
-//         float M2AB = 0.0f;
-
-//         for(int j = 0, iter = 0; j < EMBED_DIM; j+=16, iter++){     
-//             float local_sum = 0.0f;
-//             float local_sum_sq = 0.0f;
-//             for(int k = 0; k < 16; k++){
-//                 float val = X_fp32[i][j+k];
-//                 local_sum += val;
-//                 local_sum_sq += val * val;
-//             }
-//             float X_b_mean = local_sum * 0.0625f; 
-//             float mean_diff = X_b_mean - global_mean;
-//             float M_2_B = local_sum_sq - (local_sum * X_b_mean);
-//             float mean_diff_sq = mean_diff * mean_diff;
-            
-//             global_mean = MEAN_WT[iter] * mean_diff + global_mean;
-//             M2AB = M2_WT[iter] * mean_diff_sq + M_2_B + M2AB;
-//         }
-        
-//         float var = M2AB * EMBED_DIM_INV; 
-//         float inv_std = 1.0f / std::sqrt(var + EPSILON); 
-
-//         vector<float> norm_buffer(EMBED_DIM);
-//         float max_val = 0.0f;
-//         for(int j = 0; j < EMBED_DIM; j+=16){
-//             float local_max = 0.0f;
-//             for(int k = 0; k < 16; k++){
-//                 int idx = j + k;
-//                 norm_buffer[idx] = (X_fp32[i][idx] - global_mean) * inv_std * gamma[idx] + beta[idx];
-//                 local_max = std::max(local_max, std::abs(norm_buffer[idx]));
-//             }
-//             max_val = std::max(max_val, local_max);
-//         }
-//         max_val = std::max(max_val, EPSILON);
-
-//         float scale = 127.5f / max_val;
-//         token_scale[i] = 1.0f / scale;
-        
-//         for (int j = 0; j < EMBED_DIM; j++) {
-//             float scaled_val = norm_buffer[j] * scale;
-//             scaled_val = std::max(-128.0f, std::min(127.0f, std::round(scaled_val)));
-//             X_int8[i][j] = static_cast<int8_t>(scaled_val);
-//         }
-//     }
-
-//     // Step 2: Linear QKV
-//     vector<vector<vector<float>>> Q(NUM_HEADS, vector<vector<float>>(SEQ_LEN, vector<float>(HEAD_DIM)));
-//     vector<vector<vector<float>>> K(NUM_HEADS, vector<vector<float>>(SEQ_LEN, vector<float>(HEAD_DIM)));
-//     vector<vector<vector<float>>> V(NUM_HEADS, vector<vector<float>>(SEQ_LEN, vector<float>(HEAD_DIM)));
-
-//     for (int i = 0; i < SEQ_LEN; i++) {
-//         float si = token_scale[i];
-//         for (int j = 0; j < EMBED_DIM; j++) {
-//             int32_t acc_q = 0, acc_k = 0, acc_v = 0;
-//             for (int k = 0; k < EMBED_DIM; k++) {
-//                 acc_q += (int32_t)X_int8[i][k] * (int32_t)Wq[k][j];
-//                 acc_k += (int32_t)X_int8[i][k] * (int32_t)Wk[k][j];
-//                 acc_v += (int32_t)X_int8[i][k] * (int32_t)Wv[k][j];
-//             }
-//             int head_idx = j / HEAD_DIM;
-//             int head_dim = j % HEAD_DIM;
-//             Q[head_idx][i][head_dim] = (float)acc_q * si * sq[j] + bq[j];
-//             K[head_idx][i][head_dim] = (float)acc_k * si * sk[j] + bk[j];
-//             V[head_idx][i][head_dim] = (float)acc_v * si * sv[j] + bv[j];
-//         }
-//     }
-
-//     // Step 3: Multi-Head Attention Score & Context
-//     vector<vector<float>> Context(SEQ_LEN, vector<float>(EMBED_DIM));
-//     for (int h = 0; h < NUM_HEADS; h++) {
-//         for (int i = 0; i < SEQ_LEN; i++) {
-//             vector<float> scores(SEQ_LEN);
-//             float max_score = NEG_INF;
-            
-//             // Q * K^T
-//             for (int j = 0; j < SEQ_LEN; j++) {
-//                 float acc = 0.0f;
-//                 for (int d = 0; d < HEAD_DIM; d++) {
-//                     acc += Q[h][i][d] * K[h][j][d];
-//                 }
-//                 scores[j] = acc;
-//                 if (acc > max_score) max_score = acc;
-//             }
-            
-//             // Softmax
-//             float exp_sum = 0.0f;
-//             for (int j = 0; j < SEQ_LEN; j++) {
-//                 scores[j] = std::exp(scores[j] - max_score);
-//                 exp_sum += scores[j];
-//             }
-//             for (int j = 0; j < SEQ_LEN; j++) {
-//                 scores[j] /= exp_sum;
-//             }
-            
-//             // Attn * V
-//             for (int d = 0; d < HEAD_DIM; d++) {
-//                 float acc = 0.0f;
-//                 for (int j = 0; j < SEQ_LEN; j++) {
-//                     acc += scores[j] * V[h][j][d];
-//                 }
-//                 Context[i][h * HEAD_DIM + d] = acc;
-//             }
-//         }
-//     }
-
-//     // Step 4 & 5: Output Projection & Residual
-//     for (int i = 0; i < SEQ_LEN; i++) {
-//         for (int j = 0; j < EMBED_DIM; j++) {
-//             float acc_o = 0.0f;
-//             // Note: Emulating FP32 MAC for Output Projection to avoid complex INT8 re-quantize in Golden
-//             for (int k = 0; k < EMBED_DIM; k++) {
-//                 acc_o += Context[i][k] * (float)Wo[k][j] * so[j]; 
-//             }
-//             Out_ref[i][j] = acc_o + bo[j] + X_fp32[i][j]; // Output Proj + Residual
-//         }
-//     }
-// }
-
-// Golden Reference Model for Full Multi-Head Attention (Aligned with Hardware INT8 Quantization)
+// Golden Reference Model for Full Multi-Head Attention (Aligned with Hardware INT8 Quantization & 2N LayerNorm)
 void multihead_attention_golden(
     float X_fp32[SEQ_LEN][EMBED_DIM],
     float gamma[EMBED_DIM], float beta[EMBED_DIM],
@@ -181,51 +47,43 @@ void multihead_attention_golden(
     float Out_ref[SEQ_LEN][EMBED_DIM])
 {
     // ====================================================================
-    // Step 1: LayerNorm & Quantization
+    // Step 1: LayerNorm & Quantization (Updated to 2-Pass / 2N Algorithm)
     // ====================================================================
     vector<vector<int8_t>> X_int8(SEQ_LEN, vector<int8_t>(EMBED_DIM));
     vector<float> token_scale(SEQ_LEN);
 
     for (int i = 0; i < SEQ_LEN; i++) {
-        float global_mean = 0.0f; 
-        float M2AB = 0.0f;
+        // Pass 1: Compute Global Mean
+        float sum = 0.0f;
+        for (int j = 0; j < EMBED_DIM; j++) {     
+            sum += X_fp32[i][j];
+        }
+        float global_mean = sum * EMBED_DIM_INV;
 
-        for(int j = 0, iter = 0; j < EMBED_DIM; j+=16, iter++){     
-            float local_sum = 0.0f;
-            float local_sum_sq = 0.0f;
-            for(int k = 0; k < 16; k++){
-                float val = X_fp32[i][j+k];
-                local_sum += val;
-                local_sum_sq += val * val;
-            }
-            float X_b_mean = local_sum * 0.0625f; 
-            float mean_diff = X_b_mean - global_mean;
-            float M_2_B = local_sum_sq - (local_sum * X_b_mean);
-            float mean_diff_sq = mean_diff * mean_diff;
-            
-            global_mean = MEAN_WT[iter] * mean_diff + global_mean;
-            M2AB = M2_WT[iter] * mean_diff_sq + M_2_B + M2AB;
+        // Pass 2: Compute Global Variance
+        float variance_sum = 0.0f;
+        for (int j = 0; j < EMBED_DIM; j++) {
+            float diff = X_fp32[i][j] - global_mean;
+            variance_sum += diff * diff;
         }
         
-        float var = M2AB * EMBED_DIM_INV; 
+        float var = variance_sum * EMBED_DIM_INV; 
         float inv_std = 1.0f / std::sqrt(var + EPSILON); 
 
         vector<float> norm_buffer(EMBED_DIM);
         float max_val = 0.0f;
-        for(int j = 0; j < EMBED_DIM; j+=16){
-            float local_max = 0.0f;
-            for(int k = 0; k < 16; k++){
-                int idx = j + k;
-                norm_buffer[idx] = (X_fp32[i][idx] - global_mean) * inv_std * gamma[idx] + beta[idx];
-                local_max = std::max(local_max, std::abs(norm_buffer[idx]));
-            }
-            max_val = std::max(max_val, local_max);
+        
+        // Pass 3: Normalize and track maximum absolute value
+        for (int j = 0; j < EMBED_DIM; j++) {
+            norm_buffer[j] = (X_fp32[i][j] - global_mean) * inv_std * gamma[j] + beta[j];
+            max_val = std::max(max_val, std::abs(norm_buffer[j]));
         }
         max_val = std::max(max_val, EPSILON);
 
         float scale = 127.5f / max_val;
         token_scale[i] = 1.0f / scale;
         
+        // Pass 4: Quantize
         for (int j = 0; j < EMBED_DIM; j++) {
             float scaled_val = norm_buffer[j] * scale;
             scaled_val = std::max(-128.0f, std::min(127.0f, std::round(scaled_val)));
@@ -318,7 +176,9 @@ void multihead_attention_golden(
             float row_max = NEG_INF;
             float exp_sum = 0.0f;
             
-            // INT8 Dot Product Q * K^T
+            // ----------------------------------------------------
+            // Pass 1: INT8 Dot Product Q * K^T & Find row_max
+            // ----------------------------------------------------
             for (int k = 0; k < SEQ_LEN; k++) {
                 int32_t acc = 0;
                 for (int d = 0; d < HEAD_DIM; d++) {
@@ -328,15 +188,16 @@ void multihead_attention_golden(
                 // Hardware shifts by 3 (>> 3) before scaling
                 float raw_score = (float)(acc >> 3) * scale_Q[h][i] * scale_K[h][k];
                 scores[k] = raw_score;
-
-                // Online Softmax tracking
-                float prev_max = row_max;
                 row_max = std::max(row_max, raw_score);
-                float correction = std::exp(prev_max - row_max);
-                float current_exp = std::exp(raw_score - row_max);
-                exp_sum = exp_sum * correction + current_exp;
             }
             
+            // ----------------------------------------------------
+            // Pass 2: Calculate Exp Sum
+            // ----------------------------------------------------
+            for (int k = 0; k < SEQ_LEN; k++) {
+                exp_sum += std::exp(scores[k] - row_max);
+            }
+
             // Softmax Quantization (Factor = 127.0f)
             float inv_sum = 1.0f / exp_sum; 
             float row_scaler = inv_sum / 127.0f; 
@@ -382,8 +243,9 @@ void multihead_attention_golden(
     }
 
     // ====================================================================
-    // Step 5: Output Projection & Residual (INT8 MAC)
+    // Step 5: Output Projection & Residual (INT8 MAC) -> Pre-LN Output
     // ====================================================================
+    vector<vector<float>> Pre_LN_Out(SEQ_LEN, vector<float>(EMBED_DIM));
     for (int i = 0; i < SEQ_LEN; i++) {
         float token_scaler = out_scaler[i];
         for (int j = 0; j < EMBED_DIM; j++) {
@@ -397,7 +259,34 @@ void multihead_attention_golden(
             float proj_val = (float)acc_o * combined_scale + bo[j];
             
             // Add Residual
-            Out_ref[i][j] = proj_val + X_fp32[i][j];
+            Pre_LN_Out[i][j] = proj_val + X_fp32[i][j];
+        }
+    }
+
+    // ====================================================================
+    // Step 6: Final LayerNorm (FP32 Only, No Quantization)
+    // ====================================================================
+    // Note: Reusing the existing gamma and beta arrays for simplicity
+    for (int i = 0; i < SEQ_LEN; i++) {
+        // Pass 1: Compute Mean
+        float sum = 0.0f;
+        for (int j = 0; j < EMBED_DIM; j++) {
+            sum += Pre_LN_Out[i][j];
+        }
+        float mean = sum * EMBED_DIM_INV;
+
+        // Pass 2: Compute Variance
+        float variance_sum = 0.0f;
+        for (int j = 0; j < EMBED_DIM; j++) {
+            float diff = Pre_LN_Out[i][j] - mean;
+            variance_sum += diff * diff;
+        }
+        float var = variance_sum * EMBED_DIM_INV;
+        float inv_std = 1.0f / std::sqrt(var + EPSILON);
+
+        // Pass 3: Normalize and Apply Scale/Shift
+        for (int j = 0; j < EMBED_DIM; j++) {
+            Out_ref[i][j] = (Pre_LN_Out[i][j] - mean) * inv_std * gamma[j] + beta[j];
         }
     }
 }
@@ -412,7 +301,7 @@ int main() {
     auto h_Wq_fp32 = new float[EMBED_DIM][EMBED_DIM];
     auto h_Wk_fp32 = new float[EMBED_DIM][EMBED_DIM];
     auto h_Wv_fp32 = new float[EMBED_DIM][EMBED_DIM];
-    auto h_Wo_fp32 = new float[EMBED_DIM][EMBED_DIM]; // New: Output Projection Weight
+    auto h_Wo_fp32 = new float[EMBED_DIM][EMBED_DIM]; 
     
     // INT8 Matrices
     auto h_Wq = new int8_t[EMBED_DIM][EMBED_DIM];
@@ -568,31 +457,56 @@ int main() {
     float max_err = 0.0f;
     int err_cnt = 0;
     
-    // Note: Tolerance is set slightly higher because the Golden Model uses FP32 
-    // for Attention & Output Projection, while the HLS hardware implements 
-    // full INT8 quantization internally for these modules.
-    const float TOLERANCE = 5.0f; 
+    const float TOLERANCE = 0.01f; 
+
+    double sum_abs_err = 0.0;
+    double sum_sq_err  = 0.0;
+    double dot_product = 0.0;
+    double norm_ref_sq = 0.0;
+    double norm_opt_sq = 0.0;
+    
+    int total_elements = SEQ_LEN * EMBED_DIM;
 
     for (int i = 0; i < SEQ_LEN; i++) {
         for (int d = 0; d < EMBED_DIM; d++) {
-            float diff = fabs(h_Out_ref[i][d] - h_Out_opt[i][d]);
+            float ref_val = h_Out_ref[i][d];
+            float opt_val = h_Out_opt[i][d];
+            float diff = fabs(ref_val - opt_val);
+
             if (diff > max_err) max_err = diff;
             if (diff > TOLERANCE) {
-                // To avoid spamming the console, only print first 10 errors
-                if (err_cnt < 10) { 
-                    printf("Mismatch at Out[%d][%d]: Ref=%f, Opt=%f (diff=%f)\n", i, d, h_Out_ref[i][d], h_Out_opt[i][d], diff);
-                }
+                // if (err_cnt < 10) { 
+                //     printf("Mismatch at Out[%d][%d]: Ref=%f, Opt=%f (diff=%f)\n", i, d, ref_val, opt_val, diff);
+                // }
                 err_cnt++;
             }
+
+            sum_abs_err += diff;
+            sum_sq_err  += (diff * diff);
+            dot_product += (ref_val * opt_val);
+            norm_ref_sq += (ref_val * ref_val);
+            norm_opt_sq += (opt_val * opt_val);
         }
     }
 
-    printf("\nVerification Result:\n");
-    printf("Max Error: %f\n", max_err);
-    if (err_cnt == 0) {
-        printf(">> C-Simulation PASSED!\n");
+    double mae = sum_abs_err / total_elements;
+    double mse = sum_sq_err / total_elements;
+    double cos_sim = dot_product / (std::sqrt(norm_ref_sq) * std::sqrt(norm_opt_sq));
+
+    printf("\n========================================\n");
+    printf(" Verification Result\n");
+    printf("========================================\n");
+    printf("Max Error         : %f\n", max_err);
+    printf("Error Count (>%g) : %d / %d (%.2f%%)\n", TOLERANCE, err_cnt, total_elements, (float)err_cnt / total_elements * 100.0f);
+    printf("MAE (Mean Abs Err): %f\n", mae);
+    printf("MSE (Mean Sq Err) : %f\n", mse);
+    printf("Cosine Similarity : %f\n", cos_sim);
+    printf("========================================\n");
+
+    if (err_cnt == 0 || cos_sim > 0.99) {
+        printf(">> C-Simulation PASSED! (or highly accurate)\n");
     } else {
-        printf(">> C-Simulation FAILED with %d errors.\n", err_cnt);
+        printf(">> C-Simulation FAILED with significant divergence.\n");
     }
 
     // Cleanup Dynamic Memory

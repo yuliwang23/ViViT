@@ -250,9 +250,110 @@ void load_beta_gamma_HBM2SRAM(
     }
 }
 
-//  =======================================================================
-//     mean and variance
-//  =======================================================================
+// //  =======================================================================
+// //     mean and variance
+// //  =======================================================================
+
+// void compute_mean_variance(
+//     float BRAM_X[EMBED_DIM],
+//     float gamma[EMBED_DIM],
+//     float beta[EMBED_DIM],
+//     float scaler_array[SEQ_LEN],
+//     int64_dt X_package_array[SEQ_LEN][EMBED_DIM_package],
+//     int seq_idx
+// ){
+//     float global_mean = 0.0f; 
+//     float M2AB = 0.0f;
+//     float norm_buffer[EMBED_DIM];
+//     #pragma HLS INLINE off
+
+//     #pragma HLS ARRAY_PARTITION variable=BRAM_X type=cyclic factor=16
+//     #pragma HLS ARRAY_PARTITION variable=norm_buffer type=cyclic factor=16
+//     #pragma HLS ARRAY_PARTITION variable=gamma type=cyclic factor= 8
+//     #pragma HLS ARRAY_PARTITION variable=beta  type=cyclic factor= 8 
+
+//     compute_top_loop:
+//     for(int j = 0, i = 0; j < EMBED_DIM; j+=16, i++){     
+//         #pragma HLS PIPELINE II = 6
+//         float local_sum = 0.0f;
+//         float local_sum_sq = 0.0f;
+//         compute_local_sum:
+//         for(int k = 0; k < 16; k++){
+//             #pragma HLS UNROLL
+//             float val = BRAM_X[j+k];
+//             local_sum += val;
+//             local_sum_sq += val * val;
+//         }
+//         float X_b_mean = local_sum * 0.0625f; 
+//         float mean_diff = X_b_mean - global_mean;
+//         float M_2_B = local_sum_sq - (local_sum * X_b_mean);
+//         float mean_diff_sq = mean_diff * mean_diff;
+//         float mean_diff_mul_table_val = MEAN_WT[i] * mean_diff;
+//         float mean_diff_sq_mul_table_val = M2_WT[i] * mean_diff_sq;
+//         global_mean = mean_diff_mul_table_val + global_mean;
+//         M2AB = mean_diff_sq_mul_table_val + M_2_B + M2AB;
+//     }
+    
+//     float var = M2AB * EMBED_DIM_INV; 
+//     float inv_std_out = 1.0f / std::sqrt(var + EPSILON); 
+//     float max_val = 0.0f;
+    
+//     compute_norm_and_find_max_loop:
+//     for(int j = 0; j < EMBED_DIM; j+=16){
+//         #pragma HLS PIPELINE II=1
+//         float local_max = 0.0f;
+        
+//         for(int k = 0; k < 16; k++){
+//             #pragma HLS UNROLL
+//             int idx = j + k;
+//             float norm_val = (BRAM_X[idx] - global_mean) * inv_std_out * gamma[idx] + beta[idx];
+            
+//             norm_buffer[idx] = norm_val;
+            
+//             float abs_val = std::abs(norm_val);
+//             local_max = std::max(local_max, abs_val);
+//         }
+//         max_val = std::max(max_val, local_max);
+//     }
+    
+//     max_val = std::max(max_val, EPSILON);
+//     float scale = 127.5f / max_val;
+    
+//     quant_loop:
+//     for(int j = 0; j < EMBED_DIM; j+=16){
+//         #pragma HLS PIPELINE II=1
+        
+//         int64_dt chunk0 = 0; 
+//         int64_dt chunk1 = 0;
+
+//         pack_loop:
+//         for(int k = 0; k < 16; k++){
+//             #pragma HLS UNROLL
+//             int idx = j + k;
+
+//             float scaled_val = norm_buffer[idx] * scale;
+//             float clamped_val = std::max(-128.0f, std::min(127.0f, scaled_val));
+//             int8_dt q_val = static_cast<int8_dt>(clamped_val >= 0 ? clamped_val + 0.5f : clamped_val - 0.5f);
+            
+//             int bit_offset = (k % 8) * 8; 
+            
+//             if (k < 8) {
+//                 chunk0.range(bit_offset + 7, bit_offset) = q_val;
+//             } else {
+//                 chunk1.range(bit_offset + 7, bit_offset) = q_val;
+//             }
+//         }
+        
+//         int pkg_idx = j >> 3; 
+//         X_package_array[seq_idx][pkg_idx]     = chunk0;
+//         X_package_array[seq_idx][pkg_idx + 1] = chunk1;
+//     }
+//     scaler_array[seq_idx] = 1.0f / scale;
+// }
+
+// =======================================================================
+//    Mean and Variance (2-Pass / 2N Algorithm)
+// =======================================================================
 
 void compute_mean_variance(
     float BRAM_X[EMBED_DIM],
@@ -262,42 +363,64 @@ void compute_mean_variance(
     int64_dt X_package_array[SEQ_LEN][EMBED_DIM_package],
     int seq_idx
 ){
-    float global_mean = 0.0f; 
-    float M2AB = 0.0f;
-    float norm_buffer[EMBED_DIM];
     #pragma HLS INLINE off
 
     #pragma HLS ARRAY_PARTITION variable=BRAM_X type=cyclic factor=16
-    #pragma HLS ARRAY_PARTITION variable=norm_buffer type=cyclic factor=16
     #pragma HLS ARRAY_PARTITION variable=gamma type=cyclic factor= 8
     #pragma HLS ARRAY_PARTITION variable=beta  type=cyclic factor= 8 
 
-    compute_top_loop:
-    for(int j = 0, i = 0; j < EMBED_DIM; j+=16, i++){     
-        #pragma HLS PIPELINE II = 6
+    float norm_buffer[EMBED_DIM];
+    #pragma HLS ARRAY_PARTITION variable=norm_buffer type=cyclic factor=16
+    
+    // -------------------------------------------------------------------
+    // Pass 1: Compute Global Mean
+    // -------------------------------------------------------------------
+    float sum = 0.0f;
+    
+    compute_mean_loop:
+    for(int j = 0; j < EMBED_DIM; j+=16){     
+        #pragma HLS PIPELINE
         float local_sum = 0.0f;
-        float local_sum_sq = 0.0f;
-        compute_local_sum:
+        
+        // Accumulate 16 elements at a time
         for(int k = 0; k < 16; k++){
             #pragma HLS UNROLL
-            float val = BRAM_X[j+k];
-            local_sum += val;
-            local_sum_sq += val * val;
+            local_sum += BRAM_X[j+k];
         }
-        float X_b_mean = local_sum * 0.0625f; 
-        float mean_diff = X_b_mean - global_mean;
-        float M_2_B = local_sum_sq - (local_sum * X_b_mean);
-        float mean_diff_sq = mean_diff * mean_diff;
-        float mean_diff_mul_table_val = MEAN_WT[i] * mean_diff;
-        float mean_diff_sq_mul_table_val = M2_WT[i] * mean_diff_sq;
-        global_mean = mean_diff_mul_table_val + global_mean;
-        M2AB = mean_diff_sq_mul_table_val + M_2_B + M2AB;
+        sum += local_sum;
     }
     
-    float var = M2AB * EMBED_DIM_INV; 
+    // EMBED_DIM_INV is assumed to be predefined as (1.0f / EMBED_DIM)
+    float global_mean = sum * EMBED_DIM_INV; 
+
+    // -------------------------------------------------------------------
+    // Pass 2: Compute Global Variance
+    // -------------------------------------------------------------------
+    float variance_sum = 0.0f;
+    
+    compute_variance_loop:
+    for(int j = 0; j < EMBED_DIM; j+=16){
+        #pragma HLS PIPELINE
+        float local_var_sum = 0.0f;
+        
+        // Compute squared differences from the mean
+        for(int k = 0; k < 16; k++){
+            #pragma HLS UNROLL
+            float diff = BRAM_X[j+k] - global_mean;
+            local_var_sum += diff * diff;
+        }
+        variance_sum += local_var_sum;
+    }
+    
+    float var = variance_sum * EMBED_DIM_INV; 
+    
+    // Calculate the inverse standard deviation with epsilon for numerical stability
     float inv_std_out = 1.0f / std::sqrt(var + EPSILON); 
     float max_val = 0.0f;
     
+    // -------------------------------------------------------------------
+    // Pass 3: Normalize and Find Maximum Absolute Value
+    // -------------------------------------------------------------------
     compute_norm_and_find_max_loop:
     for(int j = 0; j < EMBED_DIM; j+=16){
         #pragma HLS PIPELINE II=1
@@ -306,10 +429,12 @@ void compute_mean_variance(
         for(int k = 0; k < 16; k++){
             #pragma HLS UNROLL
             int idx = j + k;
-            float norm_val = (BRAM_X[idx] - global_mean) * inv_std_out * gamma[idx] + beta[idx];
             
+            // Apply layer normalization formula
+            float norm_val = (BRAM_X[idx] - global_mean) * inv_std_out * gamma[idx] + beta[idx];
             norm_buffer[idx] = norm_val;
             
+            // Track the maximum absolute value for subsequent quantization
             float abs_val = std::abs(norm_val);
             local_max = std::max(local_max, abs_val);
         }
@@ -317,8 +442,13 @@ void compute_mean_variance(
     }
     
     max_val = std::max(max_val, EPSILON);
+    
+    // Calculate the scale factor to map to int8 range [-128, 127]
     float scale = 127.5f / max_val;
     
+    // -------------------------------------------------------------------
+    // Pass 4: Quantize to int8 and Pack into int64_dt
+    // -------------------------------------------------------------------
     quant_loop:
     for(int j = 0; j < EMBED_DIM; j+=16){
         #pragma HLS PIPELINE II=1
@@ -331,12 +461,14 @@ void compute_mean_variance(
             #pragma HLS UNROLL
             int idx = j + k;
 
+            // Scale, clamp, and round to nearest integer
             float scaled_val = norm_buffer[idx] * scale;
             float clamped_val = std::max(-128.0f, std::min(127.0f, scaled_val));
             int8_dt q_val = static_cast<int8_dt>(clamped_val >= 0 ? clamped_val + 0.5f : clamped_val - 0.5f);
             
             int bit_offset = (k % 8) * 8; 
             
+            // Pack 8 elements into chunk0, and the next 8 into chunk1
             if (k < 8) {
                 chunk0.range(bit_offset + 7, bit_offset) = q_val;
             } else {
@@ -344,10 +476,13 @@ void compute_mean_variance(
             }
         }
         
+        // Write the packed data out to memory
         int pkg_idx = j >> 3; 
         X_package_array[seq_idx][pkg_idx]     = chunk0;
         X_package_array[seq_idx][pkg_idx + 1] = chunk1;
     }
+    
+    // Save the inverse scale factor for dequantization later
     scaler_array[seq_idx] = 1.0f / scale;
 }
 
