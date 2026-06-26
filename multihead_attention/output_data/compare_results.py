@@ -20,13 +20,13 @@ def analyze_outputs(golden_file, hw_file):
     print("-" * 50)
 
     # 找出誤差大於 1.0 的數量
-    large_errors = np.sum(abs_diff > 1.0)
+    large_errors = np.sum(abs_diff > 0.01)
     total_elements = g_data.size
-    print(f"Elements with error > 1.0 : {large_errors} / {total_elements} ({large_errors/total_elements*100:.2f}%)")
+    print(f"Elements with error > 0.01 : {large_errors} / {total_elements} ({large_errors/total_elements*100:.2f}%)")
 
     # 印出 Top 10 誤差，看有沒有正負號相反或是某一方全為 0 的情況
     print("\nTop 10 Largest Errors:")
-    flat_indices = np.argsort(abs_diff)[::-1][:10]
+    flat_indices = np.argsort(abs_diff)[::-1][:1000]
     for idx in flat_indices:
         print(f"  Index {idx:6d}: Golden = {g_data[idx]:10.6f}, HW = {h_data[idx]:10.6f} (Diff: {abs_diff[idx]:.6f})")
 
