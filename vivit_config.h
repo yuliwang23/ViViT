@@ -22,6 +22,8 @@
 #define VIVIT_OUT_TILE 32
 #define VIVIT_DOT_UNROLL 8
 #define VIVIT_DSP_PER_CYCLE 8
+#define VIVIT_MLP_TILE_OUT_DIM 64
+#define VIVIT_MLP_PACK_PARALLEL 8
 
 #else
 
@@ -39,6 +41,8 @@
 #define VIVIT_OUT_TILE 64
 #define VIVIT_DOT_UNROLL 16
 #define VIVIT_DSP_PER_CYCLE 16
+#define VIVIT_MLP_TILE_OUT_DIM 512
+#define VIVIT_MLP_PACK_PARALLEL 16
 
 #endif
 
@@ -66,5 +70,9 @@ static_assert(VIVIT_HEAD_DIM % 8 == 0, "head dimension must align with 256-bit f
 static_assert(VIVIT_EMBED_DIM % 8 == 0, "embedding dimension must align with 256-bit packing");
 static_assert(VIVIT_EMBED_DIM % 16 == 0, "layernorm expects 16-wide reduction chunks");
 static_assert(VIVIT_MLP_DIM == 4 * VIVIT_EMBED_DIM, "MLP expansion must be 4x embedding dimension");
+static_assert(VIVIT_MLP_DIM % VIVIT_MLP_TILE_OUT_DIM == 0, "MLP hidden dimension must split evenly into output tiles");
+static_assert(VIVIT_EMBED_DIM % VIVIT_LINEAR_TILE_SIZE == 0, "embedding dimension must split evenly into linear tiles");
+static_assert(VIVIT_EMBED_DIM_PACKAGE % VIVIT_MLP_PACK_PARALLEL == 0, "MLP pack parallelism must split embedding packages evenly");
+static_assert(VIVIT_MLP_DIM_PACKAGE % VIVIT_MLP_PACK_PARALLEL == 0, "MLP pack parallelism must split hidden packages evenly");
 
 #endif

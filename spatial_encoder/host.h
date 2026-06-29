@@ -1,7 +1,7 @@
 #ifndef HOST_H
 #define HOST_H
 
-#include "../vivit_config.h"
+#include "./vivit_config.h"
 
 constexpr int SEQ_LEN = VIVIT_SEQ_LEN;
 constexpr int EMBED_DIM = VIVIT_EMBED_DIM;
