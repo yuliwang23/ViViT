@@ -38,13 +38,29 @@ typedef ap_uint<256> uint256_dt;
 // =======================================================================
 extern "C" {
     void mlp(
-        uint256_dt *x,
-        uint256_dt *gamma, uint256_dt *beta,
-        uint256_dt *W1, uint256_dt *W2,
-        float *b1, float *b2,
-        float *scale_w1, float *scale_w2,
-        uint256_dt *out
-    );
+    // Input Feature Map (197 * 768)
+    uint256_dt *x,
+    
+    // LayerNorm Weights
+    uint256_dt *gamma,
+    uint256_dt *beta,
+    
+    // MLP Layer 1 & 2 Weights
+    uint256_dt *W1,
+    uint256_dt *W2,
+    
+    // Biases
+    float *b1,
+    float *b2,
+    
+    // Scales
+    float *scale_w1,
+    float *scale_w2,
+    
+    // Final Output (197 * 768)
+    uint256_dt *out,
+    uint256_dt *HBM_FP32_Intermediate
+);
 }
 
 // Memory Loading Helpers
@@ -69,12 +85,52 @@ void compute_linear_mlp1_tile(int64_dt X_package[SEQ_LEN][EMBED_DIM_package], hl
 void process_mlp1_single_tile_dataflow(int64_dt X_package[SEQ_LEN][EMBED_DIM_package], uint256_dt *HBM_W1, hls::stream<float> &FIFO_GELU_in, float BRAM_b1[MLP_DIM], float scale_w1[MLP_DIM], float scale_X[SEQ_LEN], int iter);
 void run_full_mlp_layer1(int64_dt X_package[SEQ_LEN][EMBED_DIM_package], uint256_dt *HBM_W1, hls::stream<float> &FIFO_GELU_in, float *HBM_b1, float *HBM_scale_w1, float scale_X[SEQ_LEN]);
 void run_mlp1_and_gelu_dataflow(int64_dt X_package[SEQ_LEN][EMBED_DIM_package], uint256_dt *HBM_W1, float *HBM_b1, float *HBM_scale_w1, float scale_X[SEQ_LEN], int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2], float global_max[SEQ_LEN]);
-void compute_gelu_and_buffer_fp32(hls::stream<float> &FIFO_GELU_in, int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2], float global_max[SEQ_LEN]);
-void quantize_mlp1_output(int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2], float global_max[SEQ_LEN], int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM_package], float scaler_MLP1[SEQ_LEN]);
+// void compute_gelu_and_buffer_fp32(hls::stream<float> &FIFO_GELU_in, int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2], float global_max[SEQ_LEN]);
+// void quantize_mlp1_output(int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2], float global_max[SEQ_LEN], int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM_package], float scaler_MLP1[SEQ_LEN]);
 
 // MLP Layer 2 & Residual
 void compute_mlp2_proj_and_residual(int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM_package], hls::stream<uint256_dt> &FIFO_W2, hls::stream<uint256_dt> &FIFO_Res, hls::stream<uint256_dt> &FIFO_Final_Out, float scaler_MLP1[SEQ_LEN], float BRAM_b2[EMBED_DIM], float scale_w2[EMBED_DIM], int iter);
 void process_mlp2_single_tile_dataflow(int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM_package], uint256_dt *HBM_W2, uint256_dt *HBM_X_Res, uint256_dt *HBM_Out, float scaler_MLP1[SEQ_LEN], float BRAM_b2[EMBED_DIM], float scale_w2[EMBED_DIM], int iter);
 void run_full_mlp_layer2(int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM_package], uint256_dt *HBM_W2, uint256_dt *HBM_X_Res, uint256_dt *HBM_Out, float scaler_MLP1[SEQ_LEN], float *HBM_b2, float *HBM_scale_w2);
+
+void compute_gelu_and_write_FIFO(
+    hls::stream<float> &FIFO_GELU_in,
+    hls::stream<uint256_dt> &FIFO_GELU_out, 
+    float global_max[SEQ_LEN]
+);
+
+void store_FP32_FIFO2HBM(
+    hls::stream<uint256_dt> &FIFO_GELU_out,
+    uint256_dt *HBM_FP32_Intermediate
+);
+
+void load_FP32_HBM2FIFO(
+    uint256_dt *HBM_FP32_Intermediate,
+    hls::stream<uint256_dt> &FIFO_Quant_in
+);
+
+void quantize_mlp1_output_from_FIFO(
+    hls::stream<uint256_dt> &FIFO_Quant_in,
+    float global_max[SEQ_LEN],
+    int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM / INT8_PACK],
+    float scaler_MLP1[SEQ_LEN]
+);
+
+void run_mlp1_and_gelu_dataflow(
+    int64_dt X_package[SEQ_LEN][EMBED_DIM_package], // Input features (quantized)
+    uint256_dt *HBM_W1,                             // MLP1 Weights
+    float *HBM_b1,                                  // MLP1 Biases
+    float *HBM_scale_w1,                            // MLP1 Weight Scales
+    float scale_X[SEQ_LEN],                         // Input Feature Scales
+    uint256_dt *HBM_FP32_Intermediate,              // Output: FP32 buffer in HBM
+    float global_max[SEQ_LEN]                       // Output: Max values for quant
+);
+
+void run_quantize_mlp1_dataflow(
+    uint256_dt *HBM_FP32_Intermediate,              // Input: FP32 buffer in HBM
+    float global_max[SEQ_LEN],                      // Input: Max values from Phase 1
+    int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM / INT8_PACK], // Output: Quantized URAM
+    float scaler_MLP1[SEQ_LEN]                      // Output: Quantization scales
+);
 
 #endif // MLP_H

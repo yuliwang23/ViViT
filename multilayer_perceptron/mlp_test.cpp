@@ -199,12 +199,16 @@ int main() {
     const int PACK_FLOAT = 256 / 32; // 8 floats per 256-bit word
 
     // Packed Hardware Structures
-    uint256_dt* packed_X   = new uint256_dt[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT]; 
-    uint256_dt* packed_W1  = new uint256_dt[(EMBED_DIM * MLP_DIM) / PACK_INT8];
-    uint256_dt* packed_W2  = new uint256_dt[(MLP_DIM * EMBED_DIM) / PACK_INT8];
-    uint256_dt* packed_Out = new uint256_dt[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
+    uint256_dt* packed_X     = new uint256_dt[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT]; 
+    uint256_dt* packed_W1    = new uint256_dt[(EMBED_DIM * MLP_DIM) / PACK_INT8];
+    uint256_dt* packed_W2    = new uint256_dt[(MLP_DIM * EMBED_DIM) / PACK_INT8];
+    uint256_dt* packed_Out   = new uint256_dt[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
     uint256_dt* packed_gamma = new uint256_dt[EMBED_DIM / PACK_FLOAT];
     uint256_dt* packed_beta  = new uint256_dt[EMBED_DIM / PACK_FLOAT];
+
+    // NEW: Allocate HBM buffer for Intermediate FP32 data
+    const int INTERMEDIATE_CHUNKS = (SEQ_LEN * MLP_DIM) / PACK_FLOAT;
+    uint256_dt* packed_Intermediate = new uint256_dt[INTERMEDIATE_CHUNKS];
 
     // --------------------------------------------------------------------
     // Initialize Random Data
@@ -325,7 +329,8 @@ int main() {
         packed_W1, packed_W2,
         h_b1, h_b2,
         h_scale_w1, h_scale_w2,
-        packed_Out      // Final Output
+        packed_Out,     // Final Output
+        packed_Intermediate // NEW: HBM buffer for FP32 intermediate results
     );
 
     // --------------------------------------------------------------------
@@ -399,6 +404,7 @@ int main() {
     
     delete[] packed_X; delete[] packed_W1; delete[] packed_W2;
     delete[] packed_Out; delete[] packed_gamma; delete[] packed_beta;
+    delete[] packed_Intermediate; // NEW: Free the intermediate buffer
 
     return (err_cnt == 0) ? 0 : 1;
 }

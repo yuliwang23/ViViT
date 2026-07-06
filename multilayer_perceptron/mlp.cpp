@@ -1,5 +1,4 @@
 #include "mlp.h"
-
 extern "C" {
 void mlp(
     // Input Feature Map (197 * 768)
@@ -22,8 +21,9 @@ void mlp(
     float *scale_w2,
     
     // Final Output (197 * 768)
-    uint256_dt *out)
-{
+    uint256_dt *out,
+    uint256_dt *HBM_FP32_Intermediate
+) {
     // ========================================================================
     // AXI Master Interfaces
     // ========================================================================
@@ -44,6 +44,9 @@ void mlp(
     
     #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_o     depth=18912 max_widen_bitwidth=256
 
+    // NEW: AXI Master for the intermediate FP32 HBM buffer
+    #pragma HLS INTERFACE m_axi port=HBM_FP32_Intermediate offset=slave bundle=gmem_inter depth=75648 max_widen_bitwidth=256
+
     // ========================================================================
     // AXI-Lite Control Register Interfaces
     // ========================================================================
@@ -57,6 +60,7 @@ void mlp(
     #pragma HLS INTERFACE s_axilite port=scale_w1 bundle=control
     #pragma HLS INTERFACE s_axilite port=scale_w2 bundle=control
     #pragma HLS INTERFACE s_axilite port=out      bundle=control
+    #pragma HLS INTERFACE s_axilite port=HBM_FP32_Intermediate bundle=control // NEW
     #pragma HLS INTERFACE s_axilite port=return   bundle=control
 
     // ========================================================================
@@ -75,11 +79,8 @@ void mlp(
     #pragma HLS ARRAY_PARTITION variable=X_package type=cyclic factor=16 dim=2
     #pragma HLS BIND_STORAGE variable=X_package type=ram_2p impl=uram
 
-    // GELU FP32 buffer
-    static int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2];
+    // global_max buffer (Kept in BRAM since it's only 197 floats)
     float global_max[SEQ_LEN];
-    #pragma HLS ARRAY_PARTITION variable=URAM_MLP1_FP32 dim=2 type=cyclic factor=2
-    #pragma HLS BIND_STORAGE variable=URAM_MLP1_FP32 type=ram_2p impl=uram
     #pragma HLS BIND_STORAGE variable=global_max type=ram_2p impl=bram
 
     // MLP1 Quantized Output buffer
@@ -100,20 +101,29 @@ void mlp(
     // Step 2: Compute LayerNorm and pack feature map X
     do_layernorm_dataflow(x, SRAM_gamma, SRAM_beta, scaler_X, X_package);
 
-    // Step 3 & 4: Execute MLP Layer 1 & Buffer FP32 GELU output
+    // ========================================================================
+    // Phase 1: Execute MLP1, GELU, and Burst Write to HBM
+    // ========================================================================
+    // Step 3 & 4: MLP1 compute, GELU activation, and pack to HBM
     run_mlp1_and_gelu_dataflow(
         X_package, 
         W1, 
         b1, 
         scale_w1, 
         scaler_X, 
-        URAM_MLP1_FP32, 
+        HBM_FP32_Intermediate, // Replaced URAM array with HBM pointer
         global_max
     );
 
-    // Step 5: Post-GELU Dynamic Quantization
-    quantize_mlp1_output(
-        URAM_MLP1_FP32, global_max, URAM_MLP1_Quant_Out, scaler_MLP1
+    // ========================================================================
+    // Phase 2: Burst Read from HBM and Dynamic Quantization
+    // ========================================================================
+    // Step 5: Load FP32 from HBM and quantize to INT8 for MLP2
+    run_quantize_mlp1_dataflow(
+        HBM_FP32_Intermediate, 
+        global_max, 
+        URAM_MLP1_Quant_Out, 
+        scaler_MLP1
     );
 
     // Step 6: MLP Layer 2 (Projection, Dequantization & Residual Connection)
@@ -600,8 +610,43 @@ void run_full_mlp_layer1(
     }
 }
 
+// // =======================================================================
+// //   Dataflow Wrapper for MLP1 & GELU
+// // =======================================================================
+// void run_mlp1_and_gelu_dataflow(
+//     int64_dt X_package[SEQ_LEN][EMBED_DIM_package],
+//     uint256_dt *HBM_W1,
+//     float *HBM_b1,
+//     float *HBM_scale_w1,
+//     float scale_X[SEQ_LEN],
+//     int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2],
+//     float global_max[SEQ_LEN]
+// ) {
+//     #pragma HLS DATAFLOW
+    
+//     hls::stream<float> FIFO_GELU_in("FIFO_GELU_in");
+// #ifdef __SYNTHESIS__
+//     #pragma HLS STREAM variable=FIFO_GELU_in depth=64
+// #endif
+
+//     run_full_mlp_layer1(
+//         X_package, 
+//         HBM_W1, 
+//         FIFO_GELU_in, 
+//         HBM_b1, 
+//         HBM_scale_w1, 
+//         scale_X
+//     );
+
+//     compute_gelu_and_buffer_fp32(
+//         FIFO_GELU_in, 
+//         URAM_MLP1_FP32, 
+//         global_max
+//     );
+// }
+
 // =======================================================================
-//   Dataflow Wrapper for MLP1 & GELU
+//   Phase 1 Dataflow Wrapper: MLP1 -> GELU -> Store to HBM
 // =======================================================================
 void run_mlp1_and_gelu_dataflow(
     int64_dt X_package[SEQ_LEN][EMBED_DIM_package],
@@ -609,16 +654,21 @@ void run_mlp1_and_gelu_dataflow(
     float *HBM_b1,
     float *HBM_scale_w1,
     float scale_X[SEQ_LEN],
-    int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2],
+    uint256_dt *HBM_FP32_Intermediate, // Replaced URAM with HBM pointer
     float global_max[SEQ_LEN]
 ) {
     #pragma HLS DATAFLOW
     
+    // Internal streams for Phase 1
     hls::stream<float> FIFO_GELU_in("FIFO_GELU_in");
+    hls::stream<uint256_dt> FIFO_GELU_out("FIFO_GELU_out");
+
 #ifdef __SYNTHESIS__
     #pragma HLS STREAM variable=FIFO_GELU_in depth=64
+    #pragma HLS STREAM variable=FIFO_GELU_out depth=32
 #endif
 
+    // Step 3: Execute MLP Layer 1 (outputs FP32 to FIFO)
     run_full_mlp_layer1(
         X_package, 
         HBM_W1, 
@@ -628,10 +678,50 @@ void run_mlp1_and_gelu_dataflow(
         scale_X
     );
 
-    compute_gelu_and_buffer_fp32(
+    // Step 4.1: Compute GELU and pack into 256-bit chunks
+    compute_gelu_and_write_FIFO(
         FIFO_GELU_in, 
-        URAM_MLP1_FP32, 
+        FIFO_GELU_out, 
         global_max
+    );
+
+    // Step 4.2: Burst write packed FP32 data to HBM
+    store_FP32_FIFO2HBM(
+        FIFO_GELU_out, 
+        HBM_FP32_Intermediate
+    );
+}
+
+// =======================================================================
+//   Phase 2 Dataflow Wrapper: Load from HBM -> Dynamic Quantize
+// =======================================================================
+void run_quantize_mlp1_dataflow(
+    uint256_dt *HBM_FP32_Intermediate,
+    float global_max[SEQ_LEN],
+    int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM / INT8_PACK],
+    float scaler_MLP1[SEQ_LEN]
+) {
+    #pragma HLS DATAFLOW
+
+    // Internal stream for Phase 2
+    hls::stream<uint256_dt> FIFO_Quant_in("FIFO_Quant_in");
+
+#ifdef __SYNTHESIS__
+    #pragma HLS STREAM variable=FIFO_Quant_in depth=32
+#endif
+
+    // Step 5.1: Burst read packed FP32 data from HBM
+    load_FP32_HBM2FIFO(
+        HBM_FP32_Intermediate,
+        FIFO_Quant_in
+    );
+
+    // Step 5.2: Unpack, dynamically quantize to INT8, and store in URAM
+    quantize_mlp1_output_from_FIFO(
+        FIFO_Quant_in,
+        global_max,
+        URAM_MLP1_Quant_Out,
+        scaler_MLP1
     );
 }
 
@@ -657,18 +747,145 @@ inline float gelu_hw(float x) {
     
     return x * final_sig;
 }
+
+// inline float gelu_hw(float x) {
+//     #pragma HLS INLINE
+    
+//     const float BETA_2 = 0.254f;
+//     const float C_CONST = -2.57088f; // -alpha * log2(e)
+    
+//     float g_x = (x <= 0.0f) ? x : (x - BETA_2);
+    
+//     float exp_val = hls::exp2(C_CONST * g_x);
+    
+//     float denom = 1.0f + exp_val;
+    
+//     // log_val = log2(1 + 2^(C * g(x)))
+//     float log_val = hls::log2(denom);
+    
+//     // sig_opt = 2^(-log_val)
+//     float sig_opt = hls::exp2(-log_val);
+    
+//     return x * sig_opt;
+// }
+
+// // =======================================================================
+// //   Phase 1: GELU Compute & Packed FP32 URAM Buffering
+// // =======================================================================
+// void compute_gelu_and_buffer_fp32(
+//     hls::stream<float> &FIFO_GELU_in,
+//     int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2], 
+//     float global_max[SEQ_LEN]
+// ) {
+//     #pragma HLS INLINE off
+    
+//     #pragma HLS ARRAY_PARTITION variable=URAM_MLP1_FP32 dim=2 type=cyclic factor=2
+//     #pragma HLS BIND_STORAGE variable=URAM_MLP1_FP32 type=ram_2p impl=uram
+//     #pragma HLS BIND_STORAGE variable=global_max type=ram_2p impl=bram
+
+//     tile_loop:
+//     for (int iter = 0; iter < MLP1_NUM_TILES; iter++) {
+//         row_loop:
+//         for (int i = 0; i < SEQ_LEN; i++) {
+//             float local_row_max = 0.0f;
+            
+//             col_loop:
+//             for (int j = 0; j < TILE_OUT_DIM / 2; j++) {
+//                 #pragma HLS PIPELINE II=2
+                
+//                 float in_val_0 = FIFO_GELU_in.read();
+//                 float in_val_1 = FIFO_GELU_in.read();
+                
+//                 float gelu_val_0 = gelu_hw(in_val_0);
+//                 float gelu_val_1 = gelu_hw(in_val_1);
+                
+//                 union { float f; uint32_t i; } c0, c1;
+//                 c0.f = gelu_val_0;
+//                 c1.f = gelu_val_1;
+                
+//                 int64_dt pack = 0;
+//                 pack.range(31, 0) = c0.i;
+//                 pack.range(63, 32) = c1.i;
+                
+//                 int col_idx = iter * (TILE_OUT_DIM / 2) + j;
+//                 URAM_MLP1_FP32[i][col_idx] = pack;
+                
+//                 local_row_max = std::max({local_row_max, std::abs(gelu_val_0), std::abs(gelu_val_1)});
+//             }
+            
+//             if (iter == 0) {
+//                 global_max[i] = local_row_max;
+//             } else {
+//                 global_max[i] = std::max(global_max[i], local_row_max);
+//             }
+//         }
+//     }
+// }
+
+// // =======================================================================
+// //   Phase 2: Dynamic Quantization to INT8 (Post-GELU)
+// // =======================================================================
+// void quantize_mlp1_output(
+//     int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2],
+//     float global_max[SEQ_LEN],
+//     int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM / INT8_PACK],
+//     float scaler_MLP1[SEQ_LEN]
+// ) {
+//     #pragma HLS INLINE off
+    
+//     #pragma HLS ARRAY_PARTITION variable=URAM_MLP1_FP32 dim=2 type=cyclic factor=2
+//     #pragma HLS ARRAY_PARTITION variable=URAM_MLP1_Quant_Out dim=2 type=cyclic factor=4
+//     #pragma HLS BIND_STORAGE variable=URAM_MLP1_Quant_Out type=ram_2p impl=uram
+
+//     row_quant_loop:
+//     for (int i = 0; i < SEQ_LEN; i++) {
+//         #pragma HLS LOOP_FLATTEN off
+        
+//         float max_val = std::max(global_max[i], EPSILON);
+//         float scale = 127.0f / max_val;
+//         scaler_MLP1[i] = max_val / 127.0f; 
+        
+//         // 3072 / 8 = 384 cycles per row (if II=1)
+//         col_quant_loop:
+//         for (int j = 0; j < MLP_DIM / INT8_PACK; j++) {
+//             #pragma HLS PIPELINE II=2
+            
+//             int64_dt packed_int8 = 0;
+            
+//             unpack_and_quantize_loop:
+//             for (int k = 0; k < 4; k++) {
+//                 #pragma HLS UNROLL
+                
+//                 int read_idx = j * 4 + k;
+//                 int64_dt fp32_pack = URAM_MLP1_FP32[i][read_idx];
+                
+//                 union { float f; uint32_t i; } c0, c1;
+//                 c0.i = fp32_pack.range(31, 0);
+//                 c1.i = fp32_pack.range(63, 32);
+                
+//                 int8_dt q0 = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, c0.f * scale)));
+//                 int8_dt q1 = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, c1.f * scale)));
+                
+//                 int start_bit_0 = (k * 2) * 8;
+//                 int start_bit_1 = (k * 2 + 1) * 8;
+//                 packed_int8.range(start_bit_0 + 7, start_bit_0) = q0;
+//                 packed_int8.range(start_bit_1 + 7, start_bit_1) = q1;
+//             }
+            
+//             URAM_MLP1_Quant_Out[i][j] = packed_int8;
+//         }
+//     }
+// }
+
 // =======================================================================
-//   Phase 1: GELU Compute & Packed FP32 URAM Buffering
+//   Function 1: Compute GELU and Write to FIFO
 // =======================================================================
-void compute_gelu_and_buffer_fp32(
+void compute_gelu_and_write_FIFO(
     hls::stream<float> &FIFO_GELU_in,
-    int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2], 
+    hls::stream<uint256_dt> &FIFO_GELU_out, 
     float global_max[SEQ_LEN]
 ) {
     #pragma HLS INLINE off
-    
-    #pragma HLS ARRAY_PARTITION variable=URAM_MLP1_FP32 dim=2 type=cyclic factor=2
-    #pragma HLS BIND_STORAGE variable=URAM_MLP1_FP32 type=ram_2p impl=uram
     #pragma HLS BIND_STORAGE variable=global_max type=ram_2p impl=bram
 
     tile_loop:
@@ -677,29 +894,30 @@ void compute_gelu_and_buffer_fp32(
         for (int i = 0; i < SEQ_LEN; i++) {
             float local_row_max = 0.0f;
             
+            // Process 8 floats to pack into one 256-bit chunk
             col_loop:
-            for (int j = 0; j < TILE_OUT_DIM / 2; j++) {
-                #pragma HLS PIPELINE II=2
+            for (int j = 0; j < TILE_OUT_DIM / 8; j++) {
+                #pragma HLS PIPELINE II=8
                 
-                float in_val_0 = FIFO_GELU_in.read();
-                float in_val_1 = FIFO_GELU_in.read();
-                
-                float gelu_val_0 = gelu_hw(in_val_0);
-                float gelu_val_1 = gelu_hw(in_val_1);
-                
-                // 將 2 個 float (FP32) 打包成 1 個 int64_dt
-                union { float f; uint32_t i; } c0, c1;
-                c0.f = gelu_val_0;
-                c1.f = gelu_val_1;
-                
-                int64_dt pack = 0;
-                pack.range(31, 0) = c0.i;
-                pack.range(63, 32) = c1.i;
-                
-                int col_idx = iter * (TILE_OUT_DIM / 2) + j;
-                URAM_MLP1_FP32[i][col_idx] = pack;
-                
-                local_row_max = std::max({local_row_max, std::abs(gelu_val_0), std::abs(gelu_val_1)});
+                uint256_dt pack = 0;
+                float local_max_chunk = 0.0f;
+
+                pack_loop:
+                for (int k = 0; k < 8; k++) {
+                    float in_val = FIFO_GELU_in.read();
+                    float gelu_val = gelu_hw(in_val);
+                    
+                    union { float f; uint32_t i; } conv;
+                    conv.f = gelu_val;
+                    
+                    int start_bit = k * 32;
+                    int end_bit = start_bit + 31;
+                    pack.range(end_bit, start_bit) = conv.i;
+                    
+                    local_max_chunk = std::max(local_max_chunk, std::abs(gelu_val));
+                }
+                FIFO_GELU_out.write(pack);
+                local_row_max = std::max(local_row_max, local_max_chunk);
             }
             
             if (iter == 0) {
@@ -712,61 +930,116 @@ void compute_gelu_and_buffer_fp32(
 }
 
 // =======================================================================
-//   Phase 2: Dynamic Quantization to INT8 (Post-GELU)
+//   Function 2: Store FP32 Intermediate Data from FIFO to HBM
 // =======================================================================
-void quantize_mlp1_output(
-    int64_dt URAM_MLP1_FP32[SEQ_LEN][MLP_DIM / 2],
+void store_FP32_FIFO2HBM(
+    hls::stream<uint256_dt> &FIFO_GELU_out,
+    uint256_dt *HBM_FP32_Intermediate
+) {
+    #pragma HLS INLINE off
+    
+    // Total 256-bit chunks = (197 tokens * 3072 dimension) / 8 floats per chunk
+    const int TOTAL_CHUNKS = (SEQ_LEN * MLP_DIM) / 8;
+    
+    store_hbm_loop:
+    for (int i = 0; i < TOTAL_CHUNKS; i++) {
+        #pragma HLS PIPELINE II=1
+        HBM_FP32_Intermediate[i] = FIFO_GELU_out.read();
+    }
+}
+
+// =======================================================================
+//   Function 3: Load FP32 Intermediate Data from HBM to FIFO
+// =======================================================================
+void load_FP32_HBM2FIFO(
+    uint256_dt *HBM_FP32_Intermediate,
+    hls::stream<uint256_dt> &FIFO_Quant_in
+) {
+    #pragma HLS INLINE off
+    
+    const int TOTAL_CHUNKS = (SEQ_LEN * MLP_DIM) / 8;
+    
+    load_hbm_loop:
+    for (int i = 0; i < TOTAL_CHUNKS; i++) {
+        #pragma HLS PIPELINE II=1
+        FIFO_Quant_in.write(HBM_FP32_Intermediate[i]);
+    }
+}
+
+// =======================================================================
+//   Function 4: Read from FIFO and perform Dynamic Quantization
+// =======================================================================
+void quantize_mlp1_output_from_FIFO(
+    hls::stream<uint256_dt> &FIFO_Quant_in,
     float global_max[SEQ_LEN],
-    int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM / INT8_PACK],
+    int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM / INT8_PACK], // INT8_PACK = 8
     float scaler_MLP1[SEQ_LEN]
 ) {
     #pragma HLS INLINE off
     
-    #pragma HLS ARRAY_PARTITION variable=URAM_MLP1_FP32 dim=2 type=cyclic factor=2
-    #pragma HLS ARRAY_PARTITION variable=URAM_MLP1_Quant_Out dim=2 type=cyclic factor=4
+    // Bind memory for the output quantized URAM
+    #pragma HLS ARRAY_PARTITION variable=URAM_MLP1_Quant_Out dim=2 type=cyclic factor=16
     #pragma HLS BIND_STORAGE variable=URAM_MLP1_Quant_Out type=ram_2p impl=uram
 
-    row_quant_loop:
-    for (int i = 0; i < SEQ_LEN; i++) {
-        #pragma HLS LOOP_FLATTEN off
+    // CRITICAL FIX: Loop order MUST match Phase 1 (Tile -> Row -> Col) 
+    // to correctly consume the interleaved FIFO data from HBM.
+    tile_quant_loop:
+    for (int iter = 0; iter < MLP1_NUM_TILES; iter++) {
         
-        float max_val = std::max(global_max[i], EPSILON);
-        float scale = 127.0f / max_val;
-        scaler_MLP1[i] = max_val / 127.0f; 
-        
-        // 3072 / 8 = 384 cycles per row (if II=1)
-        col_quant_loop:
-        for (int j = 0; j < MLP_DIM / INT8_PACK; j++) {
-            #pragma HLS PIPELINE II=2
+        row_quant_loop:
+        for (int i = 0; i < SEQ_LEN; i++) {
+            #pragma HLS LOOP_FLATTEN off
             
-            int64_dt packed_int8 = 0;
+            // Calculate the scale for the current sequence/token
+            float max_val = std::max(global_max[i], EPSILON);
+            float scale = 127.0f / max_val;
             
-            unpack_and_quantize_loop:
-            for (int k = 0; k < 4; k++) {
-                #pragma HLS UNROLL
-                
-                int read_idx = j * 4 + k;
-                int64_dt fp32_pack = URAM_MLP1_FP32[i][read_idx];
-                
-                union { float f; uint32_t i; } c0, c1;
-                c0.i = fp32_pack.range(31, 0);
-                c1.i = fp32_pack.range(63, 32);
-                
-                int8_dt q0 = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, c0.f * scale)));
-                int8_dt q1 = (int8_dt)std::round(std::max(-128.0f, std::min(127.0f, c1.f * scale)));
-                
-                int start_bit_0 = (k * 2) * 8;
-                int start_bit_1 = (k * 2 + 1) * 8;
-                packed_int8.range(start_bit_0 + 7, start_bit_0) = q0;
-                packed_int8.range(start_bit_1 + 7, start_bit_1) = q1;
+            // Only update scaler_MLP1 once per sequence to avoid redundant writes
+            if (iter == 0) {
+                scaler_MLP1[i] = max_val / 127.0f; 
             }
             
-            URAM_MLP1_Quant_Out[i][j] = packed_int8;
+            col_quant_loop:
+            for (int j = 0; j < TILE_OUT_DIM / INT8_PACK; j++) {
+                #pragma HLS PIPELINE II=1
+                
+                // Read 8 FP32 values simultaneously
+                uint256_dt fp32_pack = FIFO_Quant_in.read();
+                int64_dt packed_int8 = 0;
+                
+                unpack_and_quantize_loop:
+                for (int k = 0; k < 8; k++) {
+                    #pragma HLS UNROLL
+                    
+                    // Extract 32-bit raw data
+                    int in_start_bit = k * 32;
+                    int in_end_bit = in_start_bit + 31;
+                    uint32_t raw_bits = fp32_pack.range(in_end_bit, in_start_bit);
+                    
+                    // Convert back to float
+                    union { uint32_t i; float f; } conv;
+                    conv.i = raw_bits;
+                    
+                    // Quantize to INT8
+                    float scaled_val = conv.f * scale;
+                    
+                    // Hardware-friendly rounding (avoids expensive std::round instantiation)
+                    float clamped_val = std::max(-128.0f, std::min(127.0f, scaled_val));
+                    int8_dt q_val = static_cast<int8_dt>(clamped_val >= 0 ? clamped_val + 0.5f : clamped_val - 0.5f);
+                    
+                    // Pack into 64-bit int64_dt
+                    int out_start_bit = k * 8;
+                    int out_end_bit = out_start_bit + 7;
+                    packed_int8.range(out_end_bit, out_start_bit) = q_val;
+                }
+                
+                // Calculate the global column index for the URAM
+                int global_col_idx = iter * (TILE_OUT_DIM / INT8_PACK) + j;
+                URAM_MLP1_Quant_Out[i][global_col_idx] = packed_int8;
+            }
         }
     }
 }
-
-
 // =======================================================================
 //   Helper Functions for MLP2 Memory Loading & Storing
 // =======================================================================

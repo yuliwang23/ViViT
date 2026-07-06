@@ -40,7 +40,7 @@ int main(int argc, char* argv[])
     // ============================================================================
     #ifdef ALL_MESSAGES
     cout << "HOST-Info: ============================================================= " << endl;
-    cout << "HOST-Info: (Step 1) Check Command Line Arguments                        " << endl;
+    cout << "HOST-Info: (Step 1) Check Command Line Arguments                         " << endl;
     cout << "HOST-Info: ============================================================= " << endl;
     #endif
 
@@ -64,8 +64,8 @@ int main(int argc, char* argv[])
     cout << endl;
     #ifdef ALL_MESSAGES
     cout << "HOST-Info: ============================================================= " << endl;
-    cout << "HOST-Info: (Step 2) Detect Target Platform and Target Device            " << endl;
-    cout << "HOST-Info:          Create Context and Command Queue                    " << endl;
+    cout << "HOST-Info: (Step 2) Detect Target Platform and Target Device             " << endl;
+    cout << "HOST-Info:         Create Context and Command Queue                     " << endl;
     cout << "HOST-Info: ============================================================= " << endl;
     #endif
 
@@ -188,6 +188,9 @@ int main(int argc, char* argv[])
     // Final Output (Float - packed into uint256_dt by HLS, received as float)
     float *Out       = nullptr; 
 
+    // NEW: Intermediate FP32 Buffer for HBM (Packed into uint256_dt in hardware)
+    float *HBM_FP32_Intermediate = nullptr; 
+
     #ifdef ALL_MESSAGES
     cout << endl;
     cout << "HOST-Info: ============================================================= " << endl;
@@ -261,6 +264,12 @@ int main(int argc, char* argv[])
     cout << "HOST-Info: Allocating memory for Output ... ";
     if (posix_memalign(&ptr, 4096, SEQ_LEN * EMBED_DIM * sizeof(float))) return EXIT_FAILURE; 
     Out = reinterpret_cast<float*>(ptr);
+    cout << "Done" << endl;
+
+    // --- 7. NEW: Allocate Memory for Intermediate HBM Buffer [SEQ_LEN * MLP_DIM] ---
+    cout << "HOST-Info: Allocating memory for Intermediate HBM Buffer ... ";
+    if (posix_memalign(&ptr, 4096, SEQ_LEN * MLP_DIM * sizeof(float))) return EXIT_FAILURE; 
+    HBM_FP32_Intermediate = reinterpret_cast<float*>(ptr);
     cout << "Done" << endl << endl;
 
     // ------------------------------------------------------------------
@@ -270,7 +279,8 @@ int main(int argc, char* argv[])
             GlobMem_BUF_W1, GlobMem_BUF_W2,
             GlobMem_BUF_b1, GlobMem_BUF_b2,
             GlobMem_BUF_scale_w1, GlobMem_BUF_scale_w2,
-            GlobMem_BUF_Out;
+            GlobMem_BUF_Out, 
+            GlobMem_BUF_HBM_Intermediate; // NEW
 
     GlobMem_BUF_X = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, SEQ_LEN * EMBED_DIM * sizeof(float), X, &errCode);
     GlobMem_BUF_gamma = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), gamma, &errCode);
@@ -286,6 +296,9 @@ int main(int argc, char* argv[])
     GlobMem_BUF_scale_w2 = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, EMBED_DIM * sizeof(float), scale_w2, &errCode);
 
     GlobMem_BUF_Out = clCreateBuffer(Context, CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR, SEQ_LEN * EMBED_DIM * sizeof(float), Out, &errCode);
+    
+    // NEW: Create Buffer for the Intermediate Data (Read/Write access for the FPGA)
+    GlobMem_BUF_HBM_Intermediate = clCreateBuffer(Context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, SEQ_LEN * MLP_DIM * sizeof(float), HBM_FP32_Intermediate, &errCode);
 
     // ============================================================================
     // Step 5: Set Kernel Arguments and Run the Application
@@ -311,6 +324,9 @@ int main(int argc, char* argv[])
     errCode |= clSetKernelArg(K_mlp, 7, sizeof(cl_mem), &GlobMem_BUF_scale_w1);
     errCode |= clSetKernelArg(K_mlp, 8, sizeof(cl_mem), &GlobMem_BUF_scale_w2);
     errCode |= clSetKernelArg(K_mlp, 9, sizeof(cl_mem), &GlobMem_BUF_Out);
+    
+    // NEW: Connect the Intermediate HBM Buffer to port index 10
+    errCode |= clSetKernelArg(K_mlp, 10, sizeof(cl_mem), &GlobMem_BUF_HBM_Intermediate);
 
     if (errCode != CL_SUCCESS) { cout << "Host-ERROR: Failed to set Kernel arguments" << endl; return EXIT_FAILURE; }
 
@@ -327,8 +343,10 @@ int main(int argc, char* argv[])
     errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_scale_w1, 0, 0, NULL, &Mem_op_event[7]);
     errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_scale_w2, 0, 0, NULL, &Mem_op_event[8]);
 
-    // Virtual allocation for output buffers on FPGA device without copying host memory content
-    errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_Out, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[9]);
+    // NEW & UPDATED: Virtual allocation for output AND intermediate buffers on FPGA device 
+    // without copying any host memory content via PCIe (saves bandwidth)
+    cl_mem undefined_content_bufs[2] = {GlobMem_BUF_Out, GlobMem_BUF_HBM_Intermediate};
+    errCode |= clEnqueueMigrateMemObjects(Command_Queue, 2, undefined_content_bufs, CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, NULL, &Mem_op_event[9]);
 
     // Sync barrier
     clEnqueueBarrierWithWaitList(Command_Queue, 0, NULL, NULL);
@@ -393,6 +411,9 @@ int main(int argc, char* argv[])
     clReleaseMemObject(GlobMem_BUF_scale_w1);
     clReleaseMemObject(GlobMem_BUF_scale_w2);
     clReleaseMemObject(GlobMem_BUF_Out);
+    
+    // NEW: Release the intermediate memory object
+    clReleaseMemObject(GlobMem_BUF_HBM_Intermediate); 
 
     clReleaseKernel(K_mlp);
     clReleaseProgram(Program);
@@ -406,6 +427,9 @@ int main(int argc, char* argv[])
     free(b1); free(b2);
     free(scale_w1); free(scale_w2);
     free(Out);
+    
+    // NEW: Free the intermediate memory allocation
+    free(HBM_FP32_Intermediate);
 
     cout << endl << "HOST-Info: DONE" << endl << endl;
 
