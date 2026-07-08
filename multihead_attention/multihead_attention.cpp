@@ -35,26 +35,26 @@ void multihead_attention(
     // AXI Master Interfaces
     // ========================================================================
     // Group 1: Native 256-bit Input Feature Map & LayerNorm Weights
-    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_x     depth=18912 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_x     depth=96    max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_x     depth=96    max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_mha     depth=18912 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_mha     depth=96    max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_mha     depth=96    max_widen_bitwidth=256
     
     // Group 2: Native 32-bit Floating-Point Vectors (Biases & Scales)
-    #pragma HLS INTERFACE m_axi port=bq       offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=bk       offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=bv       offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=bo       offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=scale_wq offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=scale_wk offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=scale_wv offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=scale_wo offset=slave bundle=gmem_bias  depth=768
+    #pragma HLS INTERFACE m_axi port=bq       offset=slave bundle=gmem_mha  depth=768
+    #pragma HLS INTERFACE m_axi port=bk       offset=slave bundle=gmem_mha  depth=768
+    #pragma HLS INTERFACE m_axi port=bv       offset=slave bundle=gmem_mha  depth=768
+    #pragma HLS INTERFACE m_axi port=bo       offset=slave bundle=gmem_mha  depth=768
+    #pragma HLS INTERFACE m_axi port=scale_wq offset=slave bundle=gmem_mha  depth=768
+    #pragma HLS INTERFACE m_axi port=scale_wk offset=slave bundle=gmem_mha  depth=768
+    #pragma HLS INTERFACE m_axi port=scale_wv offset=slave bundle=gmem_mha  depth=768
+    #pragma HLS INTERFACE m_axi port=scale_wo offset=slave bundle=gmem_mha  depth=768
 
     // Group 3: Weights & Output (Matched 256-bit width)
-    #pragma HLS INTERFACE m_axi port=Wq       offset=slave bundle=gmem_q     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=Wk       offset=slave bundle=gmem_k     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=Wv       offset=slave bundle=gmem_v     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=Wo       offset=slave bundle=gmem_o     depth=18432 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_o     depth=18912 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wq       offset=slave bundle=gmem_mha     depth=18432 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wk       offset=slave bundle=gmem_mha     depth=18432 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wv       offset=slave bundle=gmem_mha     depth=18432 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wo       offset=slave bundle=gmem_mha     depth=18432 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_mha     depth=18912 max_widen_bitwidth=256
 
     // ========================================================================
     // AXI-Lite Control Register Interfaces

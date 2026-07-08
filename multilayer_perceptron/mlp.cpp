@@ -27,25 +27,25 @@ void mlp(
     // ========================================================================
     // AXI Master Interfaces
     // ========================================================================
-    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_x     depth=18912 max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_x     depth=96    max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_x     depth=96    max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_mlp     depth=18912 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_mlp     depth=96    max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_mlp     depth=96    max_widen_bitwidth=256
     
     // b1/scale_w1 length = 3072, b2/scale_w2 length = 768
-    #pragma HLS INTERFACE m_axi port=b1       offset=slave bundle=gmem_bias  depth=3072
-    #pragma HLS INTERFACE m_axi port=b2       offset=slave bundle=gmem_bias  depth=768
-    #pragma HLS INTERFACE m_axi port=scale_w1 offset=slave bundle=gmem_bias  depth=3072
-    #pragma HLS INTERFACE m_axi port=scale_w2 offset=slave bundle=gmem_bias  depth=768
+    #pragma HLS INTERFACE m_axi port=b1       offset=slave bundle=gmem_mlp  depth=3072
+    #pragma HLS INTERFACE m_axi port=b2       offset=slave bundle=gmem_mlp  depth=768
+    #pragma HLS INTERFACE m_axi port=scale_w1 offset=slave bundle=gmem_mlp  depth=3072
+    #pragma HLS INTERFACE m_axi port=scale_w2 offset=slave bundle=gmem_mlp  depth=768
 
     // W1 size: 3072 * 768 / 32 = 73728
-    #pragma HLS INTERFACE m_axi port=W1       offset=slave bundle=gmem_w1    depth=73728 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=W1       offset=slave bundle=gmem_mlp    depth=73728 max_widen_bitwidth=256
     // W2 size: 768 * 3072 / 32 = 73728
-    #pragma HLS INTERFACE m_axi port=W2       offset=slave bundle=gmem_w2    depth=73728 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=W2       offset=slave bundle=gmem_mlp    depth=73728 max_widen_bitwidth=256
     
-    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_o     depth=18912 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_mlp     depth=18912 max_widen_bitwidth=256
 
     // NEW: AXI Master for the intermediate FP32 HBM buffer
-    #pragma HLS INTERFACE m_axi port=HBM_FP32_Intermediate offset=slave bundle=gmem_inter depth=75648 max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=HBM_FP32_Intermediate offset=slave bundle=gmem_mlp depth=75648 max_widen_bitwidth=256
 
     // ========================================================================
     // AXI-Lite Control Register Interfaces
