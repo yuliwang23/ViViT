@@ -133,4 +133,12 @@ void run_quantize_mlp1_dataflow(
     float scaler_MLP1[SEQ_LEN]                      // Output: Quantization scales
 );
 
+void load_w2_and_res_sequential(
+    uint256_dt *HBM_W2,
+    uint256_dt *HBM_X_Res,
+    hls::stream<uint256_dt> &FIFO_W2,
+    hls::stream<uint256_dt> &FIFO_Res,
+    int iter
+);
+
 #endif // MLP_H

@@ -44,7 +44,6 @@ void mlp(
     
     #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_mlp     depth=18912 max_widen_bitwidth=256
 
-    // NEW: AXI Master for the intermediate FP32 HBM buffer
     #pragma HLS INTERFACE m_axi port=HBM_FP32_Intermediate offset=slave bundle=gmem_mlp depth=75648 max_widen_bitwidth=256
 
     // ========================================================================
@@ -1262,6 +1261,19 @@ void compute_mlp2_proj_and_residual(
     }
 }
 
+void load_w2_and_res_sequential(
+    uint256_dt *HBM_W2,
+    uint256_dt *HBM_X_Res,
+    hls::stream<uint256_dt> &FIFO_W2,
+    hls::stream<uint256_dt> &FIFO_Res,
+    int iter
+) {
+    #pragma HLS INLINE off
+
+    load_W2_tile_HBM2FIFO(HBM_W2, FIFO_W2, iter);
+    load_Residual_Tile_HBM2FIFO(HBM_X_Res, FIFO_Res, iter);
+}
+
 // =======================================================================
 //   Dataflow Wrapper for a Single W2 Tile
 // =======================================================================
@@ -1284,18 +1296,19 @@ void process_mlp2_single_tile_dataflow(
     hls::stream<uint256_dt> FIFO_Final_Out("FIFO_Final_Out");
 
 #ifdef __SYNTHESIS__
-    #pragma HLS STREAM variable=FIFO_W2 depth=32
-    #pragma HLS STREAM variable=FIFO_Res depth=32
+    #pragma HLS STREAM variable=FIFO_W2 depth=8192
+    #pragma HLS STREAM variable=FIFO_Res depth=2048
     #pragma HLS STREAM variable=FIFO_Final_Out depth=32
 #endif
     
-    // Load W2 tile
-    load_W2_tile_HBM2FIFO(HBM_W2, FIFO_W2, iter);
+    load_w2_and_res_sequential(
+        HBM_W2,
+        HBM_X_Res,
+        FIFO_W2,
+        FIFO_Res,
+        iter
+    );
 
-    // Load original FP32 Residual Input (X_res)
-    load_Residual_Tile_HBM2FIFO(HBM_X_Res, FIFO_Res, iter);
-
-    // Execute Projection & Residual Addition
     compute_mlp2_proj_and_residual(
         URAM_MLP1_Quant_Out, 
         FIFO_W2, 
@@ -1307,7 +1320,6 @@ void process_mlp2_single_tile_dataflow(
         iter
     );
 
-    // Store final token values to HBM
     store_Final_Tile_FIFO2HBM(FIFO_Final_Out, HBM_Out, iter);
 }
 
