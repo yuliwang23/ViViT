@@ -79,4 +79,12 @@ void compute_mlp2_proj_and_residual(int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DI
 void process_mlp2_single_tile_dataflow(int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM_package], uint256_dt *HBM_W2, uint256_dt *HBM_X_Res, uint256_dt *HBM_Out, float scaler_MLP1[SEQ_LEN], float BRAM_b2[EMBED_DIM], float scale_w2[EMBED_DIM], int iter);
 void run_full_mlp_layer2(int64_dt URAM_MLP1_Quant_Out[SEQ_LEN][MLP_DIM_package], uint256_dt *HBM_W2, uint256_dt *HBM_X_Res, uint256_dt *HBM_Out, float scaler_MLP1[SEQ_LEN], float *HBM_b2, float *HBM_scale_w2);
 
+void load_w2_and_res_sequential(
+    uint256_dt *HBM_W2,
+    uint256_dt *HBM_X_Res,
+    hls::stream<uint256_dt> &FIFO_W2,
+    hls::stream<uint256_dt> &FIFO_Res,
+    int iter
+);
+
 #endif // MLP_H

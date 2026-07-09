@@ -279,4 +279,22 @@ void run_full_output_projection(
     float *HBM_bo,
     float *HBM_scale_wo);
 
+void load_qkv_weights_sequential(
+    uint256_dt *Wq,
+    uint256_dt *Wk,
+    uint256_dt *Wv,
+    hls::stream<uint256_dt> &FIFO_Wq,
+    hls::stream<uint256_dt> &FIFO_Wk,
+    hls::stream<uint256_dt> &FIFO_Wv,
+    int head_idx
+);
+
+void load_wo_and_res_sequential(
+    uint256_dt *HBM_Wo,
+    uint256_dt *HBM_X_Res,
+    hls::stream<uint256_dt> &FIFO_Wo,
+    hls::stream<uint256_dt> &FIFO_Res,
+    int iter
+);
+
 #endif // MULTIHEAD_ATTENTION_H

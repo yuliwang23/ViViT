@@ -35,26 +35,26 @@ void multihead_attention(
     // AXI Master Interfaces
     // ========================================================================
     // Group 1: Native 256-bit Input Feature Map & LayerNorm Weights
-    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_x     depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_x     depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_x     depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
     
     // Group 2: Native 32-bit Floating-Point Vectors (Biases & Scales)
-    #pragma HLS INTERFACE m_axi port=bq       offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
-    #pragma HLS INTERFACE m_axi port=bk       offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
-    #pragma HLS INTERFACE m_axi port=bv       offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
-    #pragma HLS INTERFACE m_axi port=bo       offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
-    #pragma HLS INTERFACE m_axi port=scale_wq offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
-    #pragma HLS INTERFACE m_axi port=scale_wk offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
-    #pragma HLS INTERFACE m_axi port=scale_wv offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
-    #pragma HLS INTERFACE m_axi port=scale_wo offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=bq       offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=bk       offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=bv       offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=bo       offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=scale_wq offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=scale_wk offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=scale_wv offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=scale_wo offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_DIM
 
     // Group 3: Weights & Output (Matched 256-bit width)
-    #pragma HLS INTERFACE m_axi port=Wq       offset=slave bundle=gmem_q     depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=Wk       offset=slave bundle=gmem_k     depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=Wv       offset=slave bundle=gmem_v     depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=Wo       offset=slave bundle=gmem_o     depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_o     depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wq       offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wk       offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wv       offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=Wo       offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_mha   depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
 
     // ========================================================================
     // AXI-Lite Control Register Interfaces
@@ -767,6 +767,25 @@ static void do_layernorm_dataflow(
     layernorm_compute(FIFO_X, scaler_X, SRAM_gamma, SRAM_beta, X_package);
 }
 
+// =======================================================================
+//   Sequential Loader for QKV Weights (Shares single AXI interface)
+// =======================================================================
+void load_qkv_weights_sequential(
+    uint256_dt *Wq, 
+    uint256_dt *Wk, 
+    uint256_dt *Wv,
+    hls::stream<uint256_dt> &FIFO_Wq,
+    hls::stream<uint256_dt> &FIFO_Wk,
+    hls::stream<uint256_dt> &FIFO_Wv,
+    int head_idx
+) {    
+    #pragma HLS INLINE off
+
+    load_Weight_tile_HBM2FIFO(Wq, FIFO_Wq, head_idx);
+    load_Weight_tile_HBM2FIFO(Wk, FIFO_Wk, head_idx);
+    load_Weight_tile_HBM2FIFO(Wv, FIFO_Wv, head_idx);
+}
+
 //  =======================================================================
 //     self attention top module
 //  =======================================================================
@@ -806,18 +825,20 @@ void process_attention_one_head_dataflow(
     hls::stream<float> FIFO_Softmax_scaler_out("FIFO_Softmax_scaler");
 
 #ifdef __SYNTHESIS__
-    #pragma HLS STREAM variable=FIFO_Wq depth=32
-    #pragma HLS STREAM variable=FIFO_Wk depth=32
-    #pragma HLS STREAM variable=FIFO_Wv depth=32
+    #pragma HLS STREAM variable=FIFO_Wq depth=2048
+    #pragma HLS STREAM variable=FIFO_Wk depth=2048
+    #pragma HLS STREAM variable=FIFO_Wv depth=2048
     #pragma HLS STREAM variable=FIFO_Q_out depth=32
     #pragma HLS STREAM variable=FIFO_K_out depth=32
     #pragma HLS STREAM variable=FIFO_V_out depth=32
     #pragma HLS STREAM variable=FIFO_Softmax_out depth=200
     #pragma HLS STREAM variable=FIFO_Softmax_scaler_out depth=2
 #endif
-    load_Weight_tile_HBM2FIFO(Wq, FIFO_Wq, head_idx);
-    load_Weight_tile_HBM2FIFO(Wk, FIFO_Wk, head_idx);
-    load_Weight_tile_HBM2FIFO(Wv, FIFO_Wv, head_idx);
+    load_qkv_weights_sequential(
+        Wq, Wk, Wv, 
+        FIFO_Wq, FIFO_Wk, FIFO_Wv, 
+        head_idx
+    );
 
     compute_linear_qkv_one_head(
         X_package, FIFO_Wq, FIFO_Wk, FIFO_Wv,
@@ -1416,6 +1437,22 @@ void compute_output_proj_and_residual(
     }
 }
 
+// =======================================================================
+//   Sequential Loader for Wo and Residual (Shares single AXI interface)
+// =======================================================================
+void load_wo_and_res_sequential(
+    uint256_dt *HBM_Wo,
+    uint256_dt *HBM_X_Res,
+    hls::stream<uint256_dt> &FIFO_Wo,
+    hls::stream<uint256_dt> &FIFO_Res,
+    int iter
+) {
+    #pragma HLS INLINE off
+
+    load_Weight_tile_HBM2FIFO(HBM_Wo, FIFO_Wo, iter);
+    load_Residual_Tile_HBM2FIFO(HBM_X_Res, FIFO_Res, iter);
+}
+
 //  =======================================================================
 //     output projection single tile TOP module
 //  =======================================================================
@@ -1438,14 +1475,18 @@ void process_o_proj_single_tile_dataflow(
     hls::stream<uint256_dt> FIFO_Final_Out("FIFO_Final_Out");
 
 #ifdef __SYNTHESIS__
-    #pragma HLS STREAM variable=FIFO_Wo depth=32
-    #pragma HLS STREAM variable=FIFO_Res depth=32
+    #pragma HLS STREAM variable=FIFO_Wo depth=2048
+    #pragma HLS STREAM variable=FIFO_Res depth=2048
     #pragma HLS STREAM variable=FIFO_Final_Out depth=32
 #endif
     
-    load_Weight_tile_HBM2FIFO(HBM_Wo, FIFO_Wo, iter);
-
-    load_Residual_Tile_HBM2FIFO(HBM_X_Res, FIFO_Res, iter);
+    load_wo_and_res_sequential(
+        HBM_Wo, 
+        HBM_X_Res, 
+        FIFO_Wo, 
+        FIFO_Res, 
+        iter
+    );
 
     compute_output_proj_and_residual(
         URAM_Quant_Out, 

@@ -27,22 +27,22 @@ void mlp(
     // ========================================================================
     // AXI Master Interfaces
     // ========================================================================
-    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_x     depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_x     depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
-    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_x     depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=x        offset=slave bundle=gmem_mlp   depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=gamma    offset=slave bundle=gmem_mlp   depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=beta     offset=slave bundle=gmem_mlp   depth=VIVIT_EMBED_VEC_PACKED_DEPTH max_widen_bitwidth=256
     
     // b1/scale_w1 length = 3072, b2/scale_w2 length = 768
-    #pragma HLS INTERFACE m_axi port=b1       offset=slave bundle=gmem_bias  depth=VIVIT_MLP_DIM
-    #pragma HLS INTERFACE m_axi port=b2       offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
-    #pragma HLS INTERFACE m_axi port=scale_w1 offset=slave bundle=gmem_bias  depth=VIVIT_MLP_DIM
-    #pragma HLS INTERFACE m_axi port=scale_w2 offset=slave bundle=gmem_bias  depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=b1       offset=slave bundle=gmem_mlp   depth=VIVIT_MLP_DIM
+    #pragma HLS INTERFACE m_axi port=b2       offset=slave bundle=gmem_mlp   depth=VIVIT_EMBED_DIM
+    #pragma HLS INTERFACE m_axi port=scale_w1 offset=slave bundle=gmem_mlp   depth=VIVIT_MLP_DIM
+    #pragma HLS INTERFACE m_axi port=scale_w2 offset=slave bundle=gmem_mlp   depth=VIVIT_EMBED_DIM
 
     // W1 size: 3072 * 768 / 32 = 73728
-    #pragma HLS INTERFACE m_axi port=W1       offset=slave bundle=gmem_w1    depth=VIVIT_MLP_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=W1       offset=slave bundle=gmem_mlp   depth=VIVIT_MLP_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
     // W2 size: 768 * 3072 / 32 = 73728
-    #pragma HLS INTERFACE m_axi port=W2       offset=slave bundle=gmem_w2    depth=VIVIT_MLP_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=W2       offset=slave bundle=gmem_mlp   depth=VIVIT_MLP_WEIGHT_INT8_PACKED_DEPTH max_widen_bitwidth=256
     
-    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_o     depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
+    #pragma HLS INTERFACE m_axi port=out      offset=slave bundle=gmem_mlp   depth=VIVIT_EMBED_FP_PACKED_DEPTH max_widen_bitwidth=256
 
     // ========================================================================
     // AXI-Lite Control Register Interfaces
@@ -499,7 +499,7 @@ void compute_linear_mlp1_tile(
                 mac_pack_loop:
                 for (int p = 0; p < MLP_PACK_PARALLEL; p++) {
                     #pragma HLS UNROLL
-                    int k_pkg = step * 16 + p;
+                    int k_pkg = step * MLP_PACK_PARALLEL + p;
                     
                     int64_dt x_pkg = X_package[i][k_pkg];
                     int64_dt w_pkg = URAM_W1[j][k_pkg];
@@ -912,7 +912,7 @@ void compute_mlp2_proj_and_residual(
                 mac_pack_loop:
                 for (int p = 0; p < MLP_PACK_PARALLEL; p++) {
                     #pragma HLS UNROLL
-                    int pack_idx = step * 16 + p;
+                    int pack_idx = step * MLP_PACK_PARALLEL + p;
                     
                     int64_dt in_pack = URAM_MLP1_Quant_Out[i][pack_idx];
                     int64_dt w2_pack = URAM_W2[j][pack_idx];
@@ -989,6 +989,19 @@ void compute_mlp2_proj_and_residual(
     }
 }
 
+void load_w2_and_res_sequential(
+    uint256_dt *HBM_W2,
+    uint256_dt *HBM_X_Res,
+    hls::stream<uint256_dt> &FIFO_W2,
+    hls::stream<uint256_dt> &FIFO_Res,
+    int iter
+) {
+    #pragma HLS INLINE off
+
+    load_W2_tile_HBM2FIFO(HBM_W2, FIFO_W2, iter);
+    load_Residual_Tile_HBM2FIFO(HBM_X_Res, FIFO_Res, iter);
+}
+
 // =======================================================================
 //   Dataflow Wrapper for a Single W2 Tile
 // =======================================================================
@@ -1011,18 +1024,19 @@ void process_mlp2_single_tile_dataflow(
     hls::stream<uint256_dt> FIFO_Final_Out("FIFO_Final_Out");
 
 #ifdef __SYNTHESIS__
-    #pragma HLS STREAM variable=FIFO_W2 depth=32
-    #pragma HLS STREAM variable=FIFO_Res depth=32
+    #pragma HLS STREAM variable=FIFO_W2 depth=8192
+    #pragma HLS STREAM variable=FIFO_Res depth=2048
     #pragma HLS STREAM variable=FIFO_Final_Out depth=32
 #endif
     
-    // Load W2 tile
-    load_W2_tile_HBM2FIFO(HBM_W2, FIFO_W2, iter);
+    load_w2_and_res_sequential(
+        HBM_W2,
+        HBM_X_Res,
+        FIFO_W2,
+        FIFO_Res,
+        iter
+    );
 
-    // Load original FP32 Residual Input (X_res)
-    load_Residual_Tile_HBM2FIFO(HBM_X_Res, FIFO_Res, iter);
-
-    // Execute Projection & Residual Addition
     compute_mlp2_proj_and_residual(
         URAM_MLP1_Quant_Out, 
         FIFO_W2, 
@@ -1034,7 +1048,6 @@ void process_mlp2_single_tile_dataflow(
         iter
     );
 
-    // Store final token values to HBM
     store_Final_Tile_FIFO2HBM(FIFO_Final_Out, HBM_Out, iter);
 }
 
