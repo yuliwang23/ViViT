@@ -1,6 +1,5 @@
 #include "multihead_attention.h"
 
-
 extern "C"{
 void multihead_attention(
     // Input Feature Map (Used for both LayerNorm and Residual)
