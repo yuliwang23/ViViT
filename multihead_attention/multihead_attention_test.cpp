@@ -1,0 +1,525 @@
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <cstdlib>
+#include <ctime>
+#include <algorithm>
+
+#include <ap_int.h>
+#include "multihead_attention.h" 
+
+using namespace std;
+
+union FloatInt {
+    float f;
+    uint32_t i;
+};
+
+// Quantize FP32 weights to INT8 per-channel
+void quantize_weight_per_channel(
+    float W_fp32[EMBED_DIM][EMBED_DIM],
+    int8_t W_int8[EMBED_DIM][EMBED_DIM],
+    float hw_scale[EMBED_DIM]
+) {
+    for (int j = 0; j < EMBED_DIM; j++) {
+        float max_abs = 1e-5f;
+        for (int i = 0; i < EMBED_DIM; i++) {
+            max_abs = std::max(max_abs, std::abs(W_fp32[i][j]));
+        }
+        float quant_scaler = 127.5f / max_abs;
+        for (int i = 0; i < EMBED_DIM; i++) {
+            float scaled_val = W_fp32[i][j] * quant_scaler;
+            scaled_val = std::max(-128.0f, std::min(127.0f, std::round(scaled_val)));
+            W_int8[i][j] = static_cast<int8_t>(scaled_val);
+        }
+        hw_scale[j] = 1.0f / quant_scaler; 
+    }
+}
+
+// Golden Reference Model for Full Multi-Head Attention (Aligned with Hardware INT8 Quantization & 2N LayerNorm)
+void multihead_attention_golden(
+    float X_fp32[SEQ_LEN][EMBED_DIM],
+    float gamma[EMBED_DIM], float beta[EMBED_DIM],
+    int8_t Wq[EMBED_DIM][EMBED_DIM], float bq[EMBED_DIM], float sq[EMBED_DIM],
+    int8_t Wk[EMBED_DIM][EMBED_DIM], float bk[EMBED_DIM], float sk[EMBED_DIM],
+    int8_t Wv[EMBED_DIM][EMBED_DIM], float bv[EMBED_DIM], float sv[EMBED_DIM],
+    int8_t Wo[EMBED_DIM][EMBED_DIM], float bo[EMBED_DIM], float so[EMBED_DIM],
+    float Out_ref[SEQ_LEN][EMBED_DIM])
+{
+    // ====================================================================
+    // Step 1: LayerNorm & Quantization (Updated to 2-Pass / 2N Algorithm)
+    // ====================================================================
+    vector<vector<int8_t>> X_int8(SEQ_LEN, vector<int8_t>(EMBED_DIM));
+    vector<float> token_scale(SEQ_LEN);
+
+    for (int i = 0; i < SEQ_LEN; i++) {
+        // Pass 1: Compute Global Mean
+        float sum = 0.0f;
+        for (int j = 0; j < EMBED_DIM; j++) {     
+            sum += X_fp32[i][j];
+        }
+        float global_mean = sum * EMBED_DIM_INV;
+
+        // Pass 2: Compute Global Variance
+        float variance_sum = 0.0f;
+        for (int j = 0; j < EMBED_DIM; j++) {
+            float diff = X_fp32[i][j] - global_mean;
+            variance_sum += diff * diff;
+        }
+        
+        float var = variance_sum * EMBED_DIM_INV; 
+        float inv_std = 1.0f / std::sqrt(var + EPSILON); 
+
+        vector<float> norm_buffer(EMBED_DIM);
+        float max_val = 0.0f;
+        
+        // Pass 3: Normalize and track maximum absolute value
+        for (int j = 0; j < EMBED_DIM; j++) {
+            norm_buffer[j] = (X_fp32[i][j] - global_mean) * inv_std * gamma[j] + beta[j];
+            max_val = std::max(max_val, std::abs(norm_buffer[j]));
+        }
+        max_val = std::max(max_val, EPSILON);
+
+        float scale = 127.5f / max_val;
+        token_scale[i] = 1.0f / scale;
+        
+        // Pass 4: Quantize
+        for (int j = 0; j < EMBED_DIM; j++) {
+            float scaled_val = norm_buffer[j] * scale;
+            scaled_val = std::max(-128.0f, std::min(127.0f, std::round(scaled_val)));
+            X_int8[i][j] = static_cast<int8_t>(scaled_val);
+        }
+    }
+
+    // ====================================================================
+    // Step 2: Linear QKV
+    // ====================================================================
+    vector<vector<vector<float>>> Q_f(NUM_HEADS, vector<vector<float>>(SEQ_LEN, vector<float>(HEAD_DIM)));
+    vector<vector<vector<float>>> K_f(NUM_HEADS, vector<vector<float>>(SEQ_LEN, vector<float>(HEAD_DIM)));
+    vector<vector<vector<float>>> V_f(NUM_HEADS, vector<vector<float>>(SEQ_LEN, vector<float>(HEAD_DIM)));
+
+    for (int i = 0; i < SEQ_LEN; i++) {
+        float si = token_scale[i];
+        for (int j = 0; j < EMBED_DIM; j++) {
+            int32_t acc_q = 0, acc_k = 0, acc_v = 0;
+            for (int k = 0; k < EMBED_DIM; k++) {
+                acc_q += (int32_t)X_int8[i][k] * (int32_t)Wq[k][j];
+                acc_k += (int32_t)X_int8[i][k] * (int32_t)Wk[k][j];
+                acc_v += (int32_t)X_int8[i][k] * (int32_t)Wv[k][j];
+            }
+            int head_idx = j / HEAD_DIM;
+            int head_dim = j % HEAD_DIM;
+            Q_f[head_idx][i][head_dim] = (float)acc_q * si * sq[j] + bq[j];
+            K_f[head_idx][i][head_dim] = (float)acc_k * si * sk[j] + bk[j];
+            V_f[head_idx][i][head_dim] = (float)acc_v * si * sv[j] + bv[j];
+        }
+    }
+
+    // ====================================================================
+    // Step 2.5: Quantize Q, K, V internally (Aligned with qkv_sram_and_quantize)
+    // ====================================================================
+    vector<vector<vector<int8_t>>> Q_q(NUM_HEADS, vector<vector<int8_t>>(SEQ_LEN, vector<int8_t>(HEAD_DIM)));
+    vector<vector<vector<int8_t>>> K_q(NUM_HEADS, vector<vector<int8_t>>(SEQ_LEN, vector<int8_t>(HEAD_DIM)));
+    vector<vector<vector<int8_t>>> V_q(NUM_HEADS, vector<vector<int8_t>>(SEQ_LEN, vector<int8_t>(HEAD_DIM)));
+    
+    vector<vector<float>> scale_Q(NUM_HEADS, vector<float>(SEQ_LEN));
+    vector<vector<float>> scale_K(NUM_HEADS, vector<float>(SEQ_LEN));
+    vector<vector<float>> scale_V(NUM_HEADS, vector<float>(HEAD_DIM)); // V is scaled per column in HW
+
+    for (int h = 0; h < NUM_HEADS; h++) {
+        // Quantize Q and K per token (row)
+        for (int i = 0; i < SEQ_LEN; i++) {
+            float max_q = 0.0f, max_k = 0.0f;
+            for (int d = 0; d < HEAD_DIM; d++) {
+                max_q = std::max(max_q, std::abs(Q_f[h][i][d]));
+                max_k = std::max(max_k, std::abs(K_f[h][i][d]));
+            }
+            max_q = std::max(max_q, EPSILON);
+            max_k = std::max(max_k, EPSILON);
+            
+            float sq_val = 127.0f / max_q;
+            float sk_val = 127.0f / max_k;
+            
+            scale_Q[h][i] = 1.0f / sq_val;
+            scale_K[h][i] = 1.0f / sk_val;
+
+            for (int d = 0; d < HEAD_DIM; d++) {
+                Q_q[h][i][d] = static_cast<int8_t>(std::round(std::max(-128.0f, std::min(127.0f, Q_f[h][i][d] * sq_val))));
+                K_q[h][i][d] = static_cast<int8_t>(std::round(std::max(-128.0f, std::min(127.0f, K_f[h][i][d] * sk_val))));
+            }
+        }
+        // Quantize V per head_dim (column)
+        for (int d = 0; d < HEAD_DIM; d++) {
+            float max_v = 0.0f;
+            for (int i = 0; i < SEQ_LEN; i++) {
+                max_v = std::max(max_v, std::abs(V_f[h][i][d]));
+            }
+            max_v = std::max(max_v, EPSILON);
+            float sv_val = 127.0f / max_v;
+            scale_V[h][d] = 1.0f / sv_val;
+
+            for (int i = 0; i < SEQ_LEN; i++) {
+                V_q[h][i][d] = static_cast<int8_t>(std::round(std::max(-128.0f, std::min(127.0f, V_f[h][i][d] * sv_val))));
+            }
+        }
+    }
+
+    // ====================================================================
+    // Step 3: Multi-Head Attention Score & Context (Aligned with HW)
+    // ====================================================================
+    vector<vector<float>> Context_f(SEQ_LEN, vector<float>(EMBED_DIM));
+    vector<float> global_max_attn(SEQ_LEN, NEG_INF); // Tracks max value for final quantization
+
+    for (int h = 0; h < NUM_HEADS; h++) {
+        for (int i = 0; i < SEQ_LEN; i++) {
+            vector<float> scores(SEQ_LEN);
+            float row_max = NEG_INF;
+            float exp_sum = 0.0f;
+            
+            // ----------------------------------------------------
+            // Pass 1: INT8 Dot Product Q * K^T & Find row_max
+            // ----------------------------------------------------
+            for (int k = 0; k < SEQ_LEN; k++) {
+                int32_t acc = 0;
+                for (int d = 0; d < HEAD_DIM; d++) {
+                    acc += (int32_t)Q_q[h][i][d] * (int32_t)K_q[h][k][d];
+                }
+                
+                // Hardware shifts by 3 (>> 3) before scaling
+                float raw_score = (float)(acc >> 3) * scale_Q[h][i] * scale_K[h][k];
+                scores[k] = raw_score;
+                row_max = std::max(row_max, raw_score);
+            }
+            
+            // ----------------------------------------------------
+            // Pass 2: Calculate Exp Sum
+            // ----------------------------------------------------
+            for (int k = 0; k < SEQ_LEN; k++) {
+                exp_sum += std::exp(scores[k] - row_max);
+            }
+
+            // Softmax Quantization (Factor = 127.0f)
+            float inv_sum = 1.0f / exp_sum; 
+            float row_scaler = inv_sum / 127.0f; 
+            vector<int8_t> q_softmax(SEQ_LEN);
+
+            for (int k = 0; k < SEQ_LEN; k++) {
+                float exp_val = std::exp(scores[k] - row_max);
+                q_softmax[k] = static_cast<int8_t>(std::round(exp_val * 127.0f));
+            }
+            
+            // INT8 Dot Product Attn * V
+            float local_max = NEG_INF;
+            for (int d = 0; d < HEAD_DIM; d++) {
+                int32_t acc = 0;
+                for (int k = 0; k < SEQ_LEN; k++) {
+                    acc += (int32_t)q_softmax[k] * (int32_t)V_q[h][k][d];
+                }
+                float out_val = (float)acc * row_scaler * scale_V[h][d];
+                Context_f[i][h * HEAD_DIM + d] = out_val;
+                local_max = std::max(local_max, std::abs(out_val));
+            }
+            
+            // Track global max across all heads for this token
+            if (h == 0) global_max_attn[i] = local_max;
+            else global_max_attn[i] = std::max(global_max_attn[i], local_max);
+        }
+    }
+
+    // ====================================================================
+    // Step 4: Quantize Attention Output
+    // ====================================================================
+    vector<vector<int8_t>> Context_q(SEQ_LEN, vector<int8_t>(EMBED_DIM));
+    vector<float> out_scaler(SEQ_LEN);
+
+    for (int i = 0; i < SEQ_LEN; i++) {
+        float max_val = std::max(global_max_attn[i], EPSILON);
+        float scale = 127.0f / max_val;
+        out_scaler[i] = max_val / 127.0f; 
+
+        for (int j = 0; j < EMBED_DIM; j++) {
+            Context_q[i][j] = static_cast<int8_t>(std::round(std::max(-128.0f, std::min(127.0f, Context_f[i][j] * scale))));
+        }
+    }
+
+    // ====================================================================
+    // Step 5: Output Projection & Residual (INT8 MAC) -> Pre-LN Output
+    // ====================================================================
+    vector<vector<float>> Pre_LN_Out(SEQ_LEN, vector<float>(EMBED_DIM));
+    for (int i = 0; i < SEQ_LEN; i++) {
+        float token_scaler = out_scaler[i];
+        for (int j = 0; j < EMBED_DIM; j++) {
+            int32_t acc_o = 0;
+            // INT8 MAC for Output Projection
+            for (int k = 0; k < EMBED_DIM; k++) {
+                acc_o += (int32_t)Context_q[i][k] * (int32_t)Wo[k][j]; 
+            }
+            
+            float combined_scale = token_scaler * so[j];
+            float proj_val = (float)acc_o * combined_scale + bo[j];
+            
+            // Add Residual
+            Pre_LN_Out[i][j] = proj_val + X_fp32[i][j];
+        }
+    }
+
+    // ====================================================================
+    // Step 6: Final LayerNorm (FP32 Only, No Quantization)
+    // ====================================================================
+    // Note: Reusing the existing gamma and beta arrays for simplicity
+    for (int i = 0; i < SEQ_LEN; i++) {
+        // Pass 1: Compute Mean
+        float sum = 0.0f;
+        for (int j = 0; j < EMBED_DIM; j++) {
+            sum += Pre_LN_Out[i][j];
+        }
+        float mean = sum * EMBED_DIM_INV;
+
+        // Pass 2: Compute Variance
+        float variance_sum = 0.0f;
+        for (int j = 0; j < EMBED_DIM; j++) {
+            float diff = Pre_LN_Out[i][j] - mean;
+            variance_sum += diff * diff;
+        }
+        float var = variance_sum * EMBED_DIM_INV;
+        float inv_std = 1.0f / std::sqrt(var + EPSILON);
+
+        // Pass 3: Normalize and Apply Scale/Shift
+        for (int j = 0; j < EMBED_DIM; j++) {
+            Out_ref[i][j] = (Pre_LN_Out[i][j] - mean) * inv_std * gamma[j] + beta[j];
+        }
+    }
+}
+
+int main() {
+    srand(42); 
+
+    cout << "Allocating memory via Heap to prevent Windows WrapC destructor crash..." << endl;
+    
+    // FP32 Matrices
+    auto h_X_fp32 = new float[SEQ_LEN][EMBED_DIM];
+    auto h_Wq_fp32 = new float[EMBED_DIM][EMBED_DIM];
+    auto h_Wk_fp32 = new float[EMBED_DIM][EMBED_DIM];
+    auto h_Wv_fp32 = new float[EMBED_DIM][EMBED_DIM];
+    auto h_Wo_fp32 = new float[EMBED_DIM][EMBED_DIM]; 
+    
+    // INT8 Matrices
+    auto h_Wq = new int8_t[EMBED_DIM][EMBED_DIM];
+    auto h_Wk = new int8_t[EMBED_DIM][EMBED_DIM];
+    auto h_Wv = new int8_t[EMBED_DIM][EMBED_DIM];
+    auto h_Wo = new int8_t[EMBED_DIM][EMBED_DIM];
+    
+    // Transposed INT8 Matrices (For HLS Packing)
+    auto h_Wq_T = new int8_t[EMBED_DIM][EMBED_DIM];
+    auto h_Wk_T = new int8_t[EMBED_DIM][EMBED_DIM];
+    auto h_Wv_T = new int8_t[EMBED_DIM][EMBED_DIM];
+    auto h_Wo_T = new int8_t[EMBED_DIM][EMBED_DIM];
+    
+    // Biases & Scales
+    auto h_bq = new float[EMBED_DIM]; auto h_bk = new float[EMBED_DIM]; 
+    auto h_bv = new float[EMBED_DIM]; auto h_bo = new float[EMBED_DIM];
+    auto h_sq = new float[EMBED_DIM]; auto h_sk = new float[EMBED_DIM]; 
+    auto h_sv = new float[EMBED_DIM]; auto h_so = new float[EMBED_DIM];
+    auto h_gamma = new float[EMBED_DIM]; auto h_beta = new float[EMBED_DIM];
+
+    // Output Tensors
+    auto h_Out_opt = new float[SEQ_LEN][EMBED_DIM];
+    auto h_Out_ref = new float[SEQ_LEN][EMBED_DIM];
+
+    const int PACK_INT8 = 256 / 8;   
+    const int PACK_FLOAT = 256 / 32; 
+
+    // Packed Hardware Structures
+    uint256_dt* packed_X  = new uint256_dt[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT]; 
+    uint256_dt* packed_Wq = new uint256_dt[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
+    uint256_dt* packed_Wk = new uint256_dt[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
+    uint256_dt* packed_Wv = new uint256_dt[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
+    uint256_dt* packed_Wo = new uint256_dt[(EMBED_DIM * EMBED_DIM) / PACK_INT8];
+    uint256_dt* packed_Out = new uint256_dt[(SEQ_LEN * EMBED_DIM) / PACK_FLOAT];
+
+    cout << "Initializing random data..." << endl;
+    for (int i = 0; i < SEQ_LEN; i++) {
+        for (int j = 0; j < EMBED_DIM; j++) {
+            h_X_fp32[i][j] = -1.0f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 2.0f));
+        }
+    }
+    for (int i = 0; i < EMBED_DIM; i++) {
+        for (int j = 0; j < EMBED_DIM; j++) {
+            h_Wq_fp32[i][j] = -0.5f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 1.0f));
+            h_Wk_fp32[i][j] = -0.5f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 1.0f));
+            h_Wv_fp32[i][j] = -0.5f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 1.0f));
+            h_Wo_fp32[i][j] = -0.5f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 1.0f));
+        }
+    }
+    for(int i = 0; i < EMBED_DIM; i++){
+        h_bq[i] = -1.0f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 2.0f));
+        h_bk[i] = -1.0f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 2.0f));
+        h_bv[i] = -1.0f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 2.0f));
+        h_bo[i] = -1.0f + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 2.0f));
+        h_gamma[i] = 1.0f;
+        h_beta[i]  = 0.0f;
+    }
+    
+    quantize_weight_per_channel(h_Wq_fp32, h_Wq, h_sq);
+    quantize_weight_per_channel(h_Wk_fp32, h_Wk, h_sk);
+    quantize_weight_per_channel(h_Wv_fp32, h_Wv, h_sv);
+    quantize_weight_per_channel(h_Wo_fp32, h_Wo, h_so);
+
+    for (int i = 0; i < EMBED_DIM; i++) {
+        for (int j = 0; j < EMBED_DIM; j++) {
+            h_Wq_T[j][i] = h_Wq[i][j];
+            h_Wk_T[j][i] = h_Wk[i][j];
+            h_Wv_T[j][i] = h_Wv[i][j];
+            h_Wo_T[j][i] = h_Wo[i][j];
+        }
+    }
+
+    cout << "Calculating Golden Reference..." << endl;
+    multihead_attention_golden(
+        h_X_fp32, h_gamma, h_beta, 
+        h_Wq, h_bq, h_sq, 
+        h_Wk, h_bk, h_sk, 
+        h_Wv, h_bv, h_sv, 
+        h_Wo, h_bo, h_so, 
+        h_Out_ref
+    );
+
+    cout << "Packing data for Hardware Kernel..." << endl;
+    int pack_idx = 0;
+    for (int i = 0; i < SEQ_LEN; i++) {
+        for (int j = 0; j < EMBED_DIM; j += PACK_FLOAT) {
+            uint256_dt wide_word = 0;
+            for (int k = 0; k < PACK_FLOAT; k++) {
+                FloatInt f_val;
+                f_val.f = h_X_fp32[i][j + k];
+                wide_word((k + 1) * 32 - 1, k * 32) = f_val.i;
+            }
+            packed_X[pack_idx++] = wide_word;
+        }
+    }
+
+    pack_idx = 0;
+    for (int i = 0; i < EMBED_DIM; i++) {
+        for (int j = 0; j < EMBED_DIM; j += PACK_INT8) {
+            uint256_dt word_q = 0, word_k = 0, word_v = 0, word_o = 0;
+            for (int k = 0; k < PACK_INT8; k++) {
+                word_q((k + 1) * 8 - 1, k * 8) = (ap_uint<8>)h_Wq_T[i][j + k];
+                word_k((k + 1) * 8 - 1, k * 8) = (ap_uint<8>)h_Wk_T[i][j + k];
+                word_v((k + 1) * 8 - 1, k * 8) = (ap_uint<8>)h_Wv_T[i][j + k];
+                word_o((k + 1) * 8 - 1, k * 8) = (ap_uint<8>)h_Wo_T[i][j + k];
+            }
+            packed_Wq[pack_idx] = word_q;
+            packed_Wk[pack_idx] = word_k;
+            packed_Wv[pack_idx] = word_v;
+            packed_Wo[pack_idx] = word_o;
+            pack_idx++;
+        }
+    }
+
+    uint256_dt* packed_gamma = new uint256_dt[EMBED_DIM / PACK_FLOAT];
+    uint256_dt* packed_beta = new uint256_dt[EMBED_DIM / PACK_FLOAT];
+    FloatInt f_one, f_zero;
+    f_one.f = 1.0f; f_zero.f = 0.0f;
+    for(int i = 0; i < EMBED_DIM / PACK_FLOAT; i++) {
+        uint256_dt word_g = 0, word_b = 0;
+        for (int k = 0; k < PACK_FLOAT; k++) {
+            word_g((k + 1) * 32 - 1, k * 32) = f_one.i;
+            word_b((k + 1) * 32 - 1, k * 32) = f_zero.i;
+        }
+        packed_gamma[i] = word_g; packed_beta[i] = word_b;
+    }
+
+    cout << "Running HLS Kernel Simulation..." << endl;
+    multihead_attention(
+        packed_X,       // Serves as both Input and Residual
+        packed_gamma, packed_beta,
+        packed_Wq, packed_Wk, packed_Wv, packed_Wo,
+        h_bq, h_bk, h_bv, h_bo,
+        h_sq, h_sk, h_sv, h_so,
+        packed_Out      // Final Output
+    );
+
+    cout << "Unpacking Results..." << endl;
+    pack_idx = 0;
+    for (int i = 0; i < SEQ_LEN; i++) {
+        for (int j = 0; j < EMBED_DIM; j += PACK_FLOAT) {
+            uint256_dt word_out = packed_Out[pack_idx++];
+            for (int k = 0; k < PACK_FLOAT; k++) {
+                FloatInt f_out;
+                ap_uint<32> out_bits = word_out((k + 1) * 32 - 1, k * 32);
+                f_out.i = out_bits.to_uint();
+                h_Out_opt[i][j + k] = f_out.f;
+            }
+        }
+    }
+
+    cout << "Comparing results..." << endl;
+    float max_err = 0.0f;
+    int err_cnt = 0;
+    
+    const float TOLERANCE = 0.01f; 
+
+    double sum_abs_err = 0.0;
+    double sum_sq_err  = 0.0;
+    double dot_product = 0.0;
+    double norm_ref_sq = 0.0;
+    double norm_opt_sq = 0.0;
+    
+    int total_elements = SEQ_LEN * EMBED_DIM;
+
+    for (int i = 0; i < SEQ_LEN; i++) {
+        for (int d = 0; d < EMBED_DIM; d++) {
+            float ref_val = h_Out_ref[i][d];
+            float opt_val = h_Out_opt[i][d];
+            float diff = fabs(ref_val - opt_val);
+
+            if (diff > max_err) max_err = diff;
+            if (diff > TOLERANCE) {
+                // if (err_cnt < 10) { 
+                //     printf("Mismatch at Out[%d][%d]: Ref=%f, Opt=%f (diff=%f)\n", i, d, ref_val, opt_val, diff);
+                // }
+                err_cnt++;
+            }
+
+            sum_abs_err += diff;
+            sum_sq_err  += (diff * diff);
+            dot_product += (ref_val * opt_val);
+            norm_ref_sq += (ref_val * ref_val);
+            norm_opt_sq += (opt_val * opt_val);
+        }
+    }
+
+    double mae = sum_abs_err / total_elements;
+    double mse = sum_sq_err / total_elements;
+    double cos_sim = dot_product / (std::sqrt(norm_ref_sq) * std::sqrt(norm_opt_sq));
+
+    printf("\n========================================\n");
+    printf(" Verification Result\n");
+    printf("========================================\n");
+    printf("Max Error         : %f\n", max_err);
+    printf("Error Count (>%g) : %d / %d (%.2f%%)\n", TOLERANCE, err_cnt, total_elements, (float)err_cnt / total_elements * 100.0f);
+    printf("MAE (Mean Abs Err): %f\n", mae);
+    printf("MSE (Mean Sq Err) : %f\n", mse);
+    printf("Cosine Similarity : %f\n", cos_sim);
+    printf("========================================\n");
+
+    if (err_cnt == 0 || cos_sim > 0.99) {
+        printf(">> C-Simulation PASSED! (or highly accurate)\n");
+    } else {
+        printf(">> C-Simulation FAILED with significant divergence.\n");
+    }
+
+    // Cleanup Dynamic Memory
+    delete[] h_X_fp32; delete[] h_Wq_fp32; delete[] h_Wk_fp32; delete[] h_Wv_fp32; delete[] h_Wo_fp32;
+    delete[] h_Wq; delete[] h_Wk; delete[] h_Wv; delete[] h_Wo;
+    delete[] h_Wq_T; delete[] h_Wk_T; delete[] h_Wv_T; delete[] h_Wo_T;
+    delete[] h_bq; delete[] h_bk; delete[] h_bv; delete[] h_bo;
+    delete[] h_sq; delete[] h_sk; delete[] h_sv; delete[] h_so;
+    delete[] h_gamma; delete[] h_beta;
+    delete[] h_Out_opt; delete[] h_Out_ref;
+    
+    delete[] packed_X; delete[] packed_Wq; delete[] packed_Wk; delete[] packed_Wv; delete[] packed_Wo;
+    delete[] packed_Out; delete[] packed_gamma; delete[] packed_beta;
+
+    return (err_cnt == 0) ? 0 : 1;
+}
