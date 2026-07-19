@@ -1,5 +1,5 @@
 #include "mlp.h"
-// version: 20260719_dsp_reduced
+// version: 20260719_gelu_tanh
 
 extern "C" {
 
@@ -987,37 +987,47 @@ void run_full_mlp_layer1(
 // =======================================================================
 // GELU
 // =======================================================================
-
 float gelu_hw(float x) {
     #pragma HLS INLINE off
     #pragma HLS PIPELINE II=4
 
-    float z =
-        1.702f *
+    const float SQRT_2_OVER_PI =
+        0.7978845608028654f;
+
+    const float CUBIC_COEFF =
+        0.044715f;
+
+    float x_squared =
+        x *
         x;
 
-    float ax =
-        std::abs(z);
+    float x_cubed =
+        x_squared *
+        x;
 
-    float e =
-        hls::exp(-ax);
+    float cubic_term =
+        CUBIC_COEFF *
+        x_cubed;
 
-    float denom =
-        1.0f +
-        e;
+    float tanh_input =
+        SQRT_2_OVER_PI *
+        (
+            x +
+            cubic_term
+        );
 
-    float sig =
-        1.0f /
-        denom;
-
-    float final_sig =
-        (x < 0.0f)
-            ? (1.0f - sig)
-            : sig;
+    float tanh_out =
+        hls::tanhf(
+            tanh_input
+        );
 
     return
+        0.5f *
         x *
-        final_sig;
+        (
+            1.0f +
+            tanh_out
+        );
 }
 
 void compute_gelu_and_write_FIFO(
