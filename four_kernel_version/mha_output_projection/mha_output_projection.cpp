@@ -1,5 +1,67 @@
 #include "mha_output_projection.h"
-// version: 20260721_four_kernel_v0
+// version: 20260725
+
+//========================================
+//============INPUT=======================
+// uint512_dt *HBM_Attention_Out,
+// float *HBM_Attention_Max,
+// uint512_dt *Wo,
+// uint512_dt *x,
+// float *bo,
+// float *scale_wo,
+//============OUTPUT======================
+// uint512_dt *out
+//========================================
+
+#ifndef OPROJ_REDUCED_OUTPUT_ENGINES
+#define OPROJ_REDUCED_OUTPUT_ENGINES 2
+#endif
+
+static constexpr int OPROJ_REDUCED_MAC_LANES = 32;
+static constexpr int OPROJ_REDUCED_VEC_BITS =
+    OPROJ_REDUCED_MAC_LANES * 8;
+
+static constexpr int OPROJ_REDUCED_WORDS_PER_ROW =
+    EMBED_DIM / OPROJ_REDUCED_MAC_LANES;
+
+static constexpr int OPROJ_REDUCED_WORDS_PER_512 =
+    INT8_PER_512 / OPROJ_REDUCED_MAC_LANES;
+
+static constexpr int OPROJ_REDUCED_ATTENTION_TOTAL_WORDS =
+    SEQ_LEN * OPROJ_REDUCED_WORDS_PER_ROW;
+
+typedef ap_uint<OPROJ_REDUCED_VEC_BITS> oproj_int8_vec_t;
+
+static_assert(
+    EMBED_DIM % OPROJ_REDUCED_MAC_LANES == 0,
+    "EMBED_DIM must be divisible by OPROJ_REDUCED_MAC_LANES"
+);
+
+static_assert(
+    INT8_PER_512 % OPROJ_REDUCED_MAC_LANES == 0,
+    "INT8_PER_512 must be divisible by OPROJ_REDUCED_MAC_LANES"
+);
+
+static_assert(
+    TILE_SIZE % OPROJ_REDUCED_OUTPUT_ENGINES == 0,
+    "TILE_SIZE must be divisible by OPROJ_REDUCED_OUTPUT_ENGINES"
+);
+
+static_assert(
+    OPROJ_REDUCED_OUTPUT_ENGINES == 1 ||
+    OPROJ_REDUCED_OUTPUT_ENGINES == 2,
+    "This implementation supports one or two output engines"
+);
+
+void run_full_output_projection(
+    const uint512_dt *HBM_Attention_Out,
+    const float *HBM_Attention_Max,
+    const uint512_dt *HBM_Wo,
+    const uint512_dt *HBM_X_Res,
+    uint512_dt *HBM_Out,
+    const float *HBM_bo,
+    const float *HBM_scale_wo
+);
 
 //========================================
 //============INPUT=======================
@@ -118,8 +180,7 @@ void load_Bias_HBM2BRAM(
     for (int i = 0; i < EMBED_DIM; i++) {
         #pragma HLS PIPELINE II=1
 
-        BRAM_b[i] =
-            HBM_b[i];
+        BRAM_b[i] = HBM_b[i];
     }
 }
 
@@ -147,7 +208,9 @@ void prepare_attention_quant_params(
 
     prepare_scale_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
-        #pragma HLS PIPELINE II=1
+        // This loop is not performance-critical. A larger II reduces pressure
+        // from the floating-point divider and improves timing closure.
+        #pragma HLS PIPELINE II=4
 
         float max_val =
             std::max(
@@ -165,17 +228,54 @@ void prepare_attention_quant_params(
     }
 }
 
+static int8_dt quantize_fp32_to_int8_reduced(
+    float input_val,
+    float quant_scale
+) {
+    #pragma HLS INLINE
+
+    float scaled_val =
+        input_val *
+        quant_scale;
+
+    float clamped_val =
+        std::max(
+            -127.0f,
+            std::min(
+                127.0f,
+                scaled_val
+            )
+        );
+
+    // Equivalent rounding direction to std::round for the clamped range,
+    // while avoiding a standalone round operator.
+    float rounded_val =
+        (clamped_val >= 0.0f)
+            ? (clamped_val + 0.5f)
+            : (clamped_val - 0.5f);
+
+    int rounded_int =
+        static_cast<int>(
+            rounded_val
+        );
+
+    return
+        static_cast<int8_dt>(
+            rounded_int
+        );
+}
+
 void load_quantize_attention_HBM2URAM(
     const uint512_dt *HBM_Attention_Out,
     float quant_scale[SEQ_LEN],
-    uint512_dt URAM_Attention_Q[
-        OPROJ_ATTENTION_TOTAL_WORDS
+    oproj_int8_vec_t URAM_Attention_Q[
+        OPROJ_REDUCED_ATTENTION_TOTAL_WORDS
     ]
 ) {
     #pragma HLS INLINE off
 
-    constexpr int FP32_WORDS_PER_INT8_WORD =
-        INT8_PER_512 /
+    constexpr int FP32_WORDS_PER_REDUCED_WORD =
+        OPROJ_REDUCED_MAC_LANES /
         FP32_PER_512;
 
     token_loop:
@@ -183,133 +283,115 @@ void load_quantize_attention_HBM2URAM(
         float token_quant_scale =
             quant_scale[token];
 
-        quantized_word_loop:
+        reduced_word_loop:
         for (
-            int quant_word_idx = 0;
-            quant_word_idx < OPROJ_INT8_WORDS_PER_ROW;
-            quant_word_idx++
+            int reduced_word_idx = 0;
+            reduced_word_idx <
+                OPROJ_REDUCED_WORDS_PER_ROW;
+            reduced_word_idx++
         ) {
-            int64_dt quant_packages[INT64_PER_512];
+            int8_dt quantized_lane[
+                OPROJ_REDUCED_MAC_LANES
+            ];
 
-            #pragma HLS ARRAY_PARTITION variable=quant_packages \
+            #pragma HLS ARRAY_PARTITION \
+                variable=quantized_lane \
                 type=complete dim=1
 
             source_word_loop:
             for (
                 int source_word_idx = 0;
-                source_word_idx < FP32_WORDS_PER_INT8_WORD;
+                source_word_idx <
+                    FP32_WORDS_PER_REDUCED_WORD;
                 source_word_idx++
             ) {
                 int hbm_word_idx =
-                    token * FP32_WORDS_PER_ROW +
-                    quant_word_idx *
-                        FP32_WORDS_PER_INT8_WORD +
+                    token *
+                        FP32_WORDS_PER_ROW +
+                    reduced_word_idx *
+                        FP32_WORDS_PER_REDUCED_WORD +
                     source_word_idx;
 
                 uint512_dt fp32_chunk =
-                    HBM_Attention_Out[hbm_word_idx];
+                    HBM_Attention_Out[
+                        hbm_word_idx
+                    ];
 
-                quantize_half_loop:
-                for (int half = 0; half < 2; half++) {
+                quantize_lane_loop:
+                for (
+                    int lane = 0;
+                    lane < FP32_PER_512;
+                    lane++
+                ) {
+                    // One FP32 quantization lane per cycle.
+                    // The original code generated eight parallel lanes.
                     #pragma HLS PIPELINE II=1
 
-                    int64_dt packed_int8 =
-                        0;
+                    int fp32_start =
+                        lane * 32;
 
-                    quantize_lane_loop:
-                    for (
-                        int lane = 0;
-                        lane < INT8_PACK;
-                        lane++
-                    ) {
-                        #pragma HLS UNROLL
+                    int fp32_end =
+                        fp32_start + 31;
 
-                        int fp32_lane =
-                            half * INT8_PACK +
-                            lane;
+                    union {
+                        float f;
+                        uint32_t i;
+                    } converter;
 
-                        int fp32_start =
-                            fp32_lane * 32;
+                    converter.i =
+                        static_cast<uint32_t>(
+                            fp32_chunk.range(
+                                fp32_end,
+                                fp32_start
+                            )
+                        );
 
-                        int fp32_end =
-                            fp32_start + 31;
+                    int target_lane =
+                        source_word_idx *
+                            FP32_PER_512 +
+                        lane;
 
-                        union {
-                            float f;
-                            uint32_t i;
-                        } converter;
-
-                        converter.i =
-                            static_cast<uint32_t>(
-                                fp32_chunk.range(
-                                    fp32_end,
-                                    fp32_start
-                                )
-                            );
-
-                        float scaled_val =
-                            converter.f *
-                            token_quant_scale;
-
-                        float clamped_val =
-                            std::max(
-                                -127.0f,
-                                std::min(
-                                    127.0f,
-                                    scaled_val
-                                )
-                            );
-
-                        int8_dt q_val =
-                            static_cast<int8_dt>(
-                                std::round(
-                                    clamped_val
-                                )
-                            );
-
-                        packed_int8.range(
-                            lane * 8 + 7,
-                            lane * 8
-                        ) = q_val;
-                    }
-
-                    int package_idx =
-                        source_word_idx * 2 +
-                        half;
-
-                    quant_packages[package_idx] =
-                        packed_int8;
+                    quantized_lane[target_lane] =
+                        quantize_fp32_to_int8_reduced(
+                            converter.f,
+                            token_quant_scale
+                        );
                 }
             }
 
-            uint512_dt quantized_word =
+            oproj_int8_vec_t quantized_word =
                 0;
 
-            pack_quantized_word_loop:
+            pack_reduced_word_loop:
             for (
-                int package_idx = 0;
-                package_idx < INT64_PER_512;
-                package_idx++
+                int lane = 0;
+                lane <
+                    OPROJ_REDUCED_MAC_LANES;
+                lane++
             ) {
                 #pragma HLS UNROLL
 
                 int start_bit =
-                    package_idx * 64;
+                    lane * 8;
 
                 int end_bit =
-                    start_bit + 63;
+                    start_bit + 7;
 
                 quantized_word.range(
                     end_bit,
                     start_bit
-                ) = quant_packages[package_idx];
+                ) =
+                    quantized_lane[lane];
             }
 
             int uram_addr =
-                token * OPROJ_INT8_WORDS_PER_ROW +
-                quant_word_idx;
+                token *
+                    OPROJ_REDUCED_WORDS_PER_ROW +
+                reduced_word_idx;
 
-            URAM_Attention_Q[uram_addr] =
+            URAM_Attention_Q[
+                uram_addr
+            ] =
                 quantized_word;
         }
     }
@@ -420,22 +502,19 @@ void store_Final_Tile_FIFO2HBM(
     }
 }
 
-static int32_dt dot_product_128_int8(
-    uint512_dt input_word_0,
-    uint512_dt input_word_1,
-    uint512_dt weight_word_0,
-    uint512_dt weight_word_1
+static int32_dt dot_product_32_int8(
+    oproj_int8_vec_t input_word,
+    oproj_int8_vec_t weight_word
 ) {
     #pragma HLS INLINE
 
-    int32_dt product[128];
+    ap_int<16> product[32];
 
-    int32_dt level_1[64];
-    int32_dt level_2[32];
-    int32_dt level_3[16];
-    int32_dt level_4[8];
-    int32_dt level_5[4];
-    int32_dt level_6[2];
+    ap_int<17> level_1[16];
+    ap_int<18> level_2[8];
+    ap_int<19> level_3[4];
+    ap_int<20> level_4[2];
+    ap_int<21> level_5;
 
     #pragma HLS ARRAY_PARTITION variable=product \
         type=complete dim=1
@@ -452,14 +531,12 @@ static int32_dt dot_product_128_int8(
     #pragma HLS ARRAY_PARTITION variable=level_4 \
         type=complete dim=1
 
-    #pragma HLS ARRAY_PARTITION variable=level_5 \
-        type=complete dim=1
-
-    #pragma HLS ARRAY_PARTITION variable=level_6 \
-        type=complete dim=1
-
-    multiply_word_0_loop:
-    for (int idx = 0; idx < INT8_PER_512; idx++) {
+    multiply_loop:
+    for (
+        int idx = 0;
+        idx < OPROJ_REDUCED_MAC_LANES;
+        idx++
+    ) {
         #pragma HLS UNROLL
 
         int start_bit =
@@ -470,7 +547,7 @@ static int32_dt dot_product_128_int8(
 
         int8_dt input_val =
             static_cast<int8_dt>(
-                input_word_0.range(
+                input_word.range(
                     end_bit,
                     start_bit
                 )
@@ -478,7 +555,7 @@ static int32_dt dot_product_128_int8(
 
         int8_dt weight_val =
             static_cast<int8_dt>(
-                weight_word_0.range(
+                weight_word.range(
                     end_bit,
                     start_bit
                 )
@@ -489,41 +566,8 @@ static int32_dt dot_product_128_int8(
             weight_val;
     }
 
-    multiply_word_1_loop:
-    for (int idx = 0; idx < INT8_PER_512; idx++) {
-        #pragma HLS UNROLL
-
-        int start_bit =
-            idx * 8;
-
-        int end_bit =
-            start_bit + 7;
-
-        int8_dt input_val =
-            static_cast<int8_dt>(
-                input_word_1.range(
-                    end_bit,
-                    start_bit
-                )
-            );
-
-        int8_dt weight_val =
-            static_cast<int8_dt>(
-                weight_word_1.range(
-                    end_bit,
-                    start_bit
-                )
-            );
-
-        product[
-            INT8_PER_512 + idx
-        ] =
-            input_val *
-            weight_val;
-    }
-
     reduce_level_1:
-    for (int idx = 0; idx < 64; idx++) {
+    for (int idx = 0; idx < 16; idx++) {
         #pragma HLS UNROLL
 
         level_1[idx] =
@@ -532,7 +576,7 @@ static int32_dt dot_product_128_int8(
     }
 
     reduce_level_2:
-    for (int idx = 0; idx < 32; idx++) {
+    for (int idx = 0; idx < 8; idx++) {
         #pragma HLS UNROLL
 
         level_2[idx] =
@@ -541,7 +585,7 @@ static int32_dt dot_product_128_int8(
     }
 
     reduce_level_3:
-    for (int idx = 0; idx < 16; idx++) {
+    for (int idx = 0; idx < 4; idx++) {
         #pragma HLS UNROLL
 
         level_3[idx] =
@@ -550,7 +594,7 @@ static int32_dt dot_product_128_int8(
     }
 
     reduce_level_4:
-    for (int idx = 0; idx < 8; idx++) {
+    for (int idx = 0; idx < 2; idx++) {
         #pragma HLS UNROLL
 
         level_4[idx] =
@@ -558,32 +602,19 @@ static int32_dt dot_product_128_int8(
             level_3[idx * 2 + 1];
     }
 
-    reduce_level_5:
-    for (int idx = 0; idx < 4; idx++) {
-        #pragma HLS UNROLL
-
-        level_5[idx] =
-            level_4[idx * 2] +
-            level_4[idx * 2 + 1];
-    }
-
-    reduce_level_6:
-    for (int idx = 0; idx < 2; idx++) {
-        #pragma HLS UNROLL
-
-        level_6[idx] =
-            level_5[idx * 2] +
-            level_5[idx * 2 + 1];
-    }
+    level_5 =
+        level_4[0] +
+        level_4[1];
 
     return
-        level_6[0] +
-        level_6[1];
+        static_cast<int32_dt>(
+            level_5
+        );
 }
 
 void compute_output_proj_and_residual(
-    uint512_dt URAM_Attention_Q[
-        OPROJ_ATTENTION_TOTAL_WORDS
+    oproj_int8_vec_t URAM_Attention_Q[
+        OPROJ_REDUCED_ATTENTION_TOTAL_WORDS
     ],
     hls::stream<uint512_dt> &FIFO_Wo,
     hls::stream<uint512_dt> &FIFO_Res,
@@ -596,30 +627,63 @@ void compute_output_proj_and_residual(
     #pragma HLS INLINE off
 
 #ifdef __SYNTHESIS__
-    uint512_dt URAM_Wo
+    oproj_int8_vec_t URAM_Wo
         [TILE_SIZE]
-        [OPROJ_INT8_WORDS_PER_ROW];
+        [OPROJ_REDUCED_WORDS_PER_ROW];
 #else
-    static uint512_dt URAM_Wo
+    static oproj_int8_vec_t URAM_Wo
         [TILE_SIZE]
-        [OPROJ_INT8_WORDS_PER_ROW];
+        [OPROJ_REDUCED_WORDS_PER_ROW];
 #endif
 
+    // The output-channel dimension is banked so the two 32-MAC engines can
+    // read two independent weight rows in the same cycle.
+    #pragma HLS ARRAY_PARTITION variable=URAM_Wo \
+        type=cyclic factor=OPROJ_REDUCED_OUTPUT_ENGINES dim=1
+
     #pragma HLS BIND_STORAGE variable=URAM_Wo \
-        type=ram_2p impl=uram
+        type=ram_1p impl=uram
+
+    constexpr int HBM_WEIGHT_WORDS_PER_ROW =
+        EMBED_DIM /
+        INT8_PER_512;
 
     load_wo_row:
     for (int row = 0; row < TILE_SIZE; row++) {
         load_wo_col:
         for (
-            int word_idx = 0;
-            word_idx < OPROJ_INT8_WORDS_PER_ROW;
-            word_idx++
+            int hbm_word_idx = 0;
+            hbm_word_idx <
+                HBM_WEIGHT_WORDS_PER_ROW;
+            hbm_word_idx++
         ) {
-            #pragma HLS PIPELINE II=1
+            // A 512-bit HBM word is converted into two 256-bit URAM words.
+            // II=2 intentionally avoids requiring two wide URAM writes in
+            // the same clock cycle.
+            #pragma HLS PIPELINE II=2
 
-            URAM_Wo[row][word_idx] =
+            uint512_dt packed_weight =
                 FIFO_Wo.read();
+
+            int reduced_word_base =
+                hbm_word_idx *
+                OPROJ_REDUCED_WORDS_PER_512;
+
+            URAM_Wo[row][
+                reduced_word_base
+            ] =
+                packed_weight.range(
+                    255,
+                    0
+                );
+
+            URAM_Wo[row][
+                reduced_word_base + 1
+            ] =
+                packed_weight.range(
+                    511,
+                    256
+                );
         }
     }
 
@@ -629,78 +693,101 @@ void compute_output_proj_and_residual(
 
         int32_dt acc_buffer[TILE_SIZE];
 
+        #pragma HLS ARRAY_PARTITION variable=acc_buffer \
+            type=cyclic factor=OPROJ_REDUCED_OUTPUT_ENGINES dim=1
+
         #pragma HLS BIND_STORAGE variable=acc_buffer \
-            type=ram_2p impl=lutram
+            type=ram_1p impl=lutram
 
         int attention_row_base =
             i *
-            OPROJ_INT8_WORDS_PER_ROW;
+            OPROJ_REDUCED_WORDS_PER_ROW;
 
         compute_tile:
-        for (int j = 0; j < TILE_SIZE; j++) {
-            int32_dt acc =
-                0;
+        for (
+            int j_base = 0;
+            j_base < TILE_SIZE;
+            j_base += OPROJ_REDUCED_OUTPUT_ENGINES
+        ) {
+            int32_dt acc[
+                OPROJ_REDUCED_OUTPUT_ENGINES
+            ];
+
+            #pragma HLS ARRAY_PARTITION variable=acc \
+                type=complete dim=1
+
+            initialize_acc_loop:
+            for (
+                int engine = 0;
+                engine <
+                    OPROJ_REDUCED_OUTPUT_ENGINES;
+                engine++
+            ) {
+                #pragma HLS UNROLL
+
+                acc[engine] =
+                    0;
+            }
 
             dot_product_step:
             for (
                 int step = 0;
-                step < OPROJ_DOT_STEPS;
+                step <
+                    OPROJ_REDUCED_WORDS_PER_ROW;
                 step++
             ) {
+                // Each engine performs 32 INT8 MAC/cycle. With the default
+                // two engines, the total is 64 INT8 MAC/cycle, compared with
+                // 128 INT8 MAC/cycle in the original implementation.
+                //
+                // The critical reduction tree of each engine decreases from
+                // seven levels to five levels.
                 #pragma HLS PIPELINE II=1
 
-                int word_offset =
-                    step *
-                    OPROJ_WORDS_PER_STEP;
-
-                int attention_addr_0 =
-                    attention_row_base +
-                    word_offset;
-
-                int attention_addr_1 =
-                    attention_addr_0 +
-                    1;
-
-                uint512_dt input_word_0 =
+                oproj_int8_vec_t input_word =
                     URAM_Attention_Q[
-                        attention_addr_0
+                        attention_row_base +
+                        step
                     ];
 
-                uint512_dt input_word_1 =
-                    URAM_Attention_Q[
-                        attention_addr_1
-                    ];
-
-                uint512_dt weight_word_0 =
-                    URAM_Wo[j][word_offset];
-
-                uint512_dt weight_word_1 =
-                    URAM_Wo[j][word_offset + 1];
-
-                int32_dt cycle_acc =
-                    dot_product_128_int8(
-                        input_word_0,
-                        input_word_1,
-                        weight_word_0,
-                        weight_word_1
-                    );
-
-                if (step == 0) {
-                    acc =
-                        cycle_acc;
-                } else {
-                    acc =
-                        acc +
-                        cycle_acc;
-                }
-
-                if (
-                    step ==
-                    OPROJ_DOT_STEPS - 1
+                output_engine_loop:
+                for (
+                    int engine = 0;
+                    engine <
+                        OPROJ_REDUCED_OUTPUT_ENGINES;
+                    engine++
                 ) {
-                    acc_buffer[j] =
-                        acc;
+                    #pragma HLS UNROLL
+
+                    oproj_int8_vec_t weight_word =
+                        URAM_Wo[
+                            j_base + engine
+                        ][step];
+
+                    int32_dt cycle_acc =
+                        dot_product_32_int8(
+                            input_word,
+                            weight_word
+                        );
+
+                    acc[engine] +=
+                        cycle_acc;
                 }
+            }
+
+            store_acc_loop:
+            for (
+                int engine = 0;
+                engine <
+                    OPROJ_REDUCED_OUTPUT_ENGINES;
+                engine++
+            ) {
+                #pragma HLS UNROLL
+
+                acc_buffer[
+                    j_base + engine
+                ] =
+                    acc[engine];
             }
         }
 
@@ -717,7 +804,10 @@ void compute_output_proj_and_residual(
 
         post_process_loop:
         for (int j = 0; j < TILE_SIZE; j++) {
-            #pragma HLS PIPELINE II=1
+            // Relaxing II from 1 to 2 allows the floating-point multiply/add
+            // chain to be scheduled across more cycles and reduces pressure
+            // on DSP sharing and timing closure.
+            #pragma HLS PIPELINE II=2
 
             int pack_lane =
                 j %
@@ -732,18 +822,22 @@ void compute_output_proj_and_residual(
                 acc_buffer[j];
 
             int weight_idx =
-                iter * TILE_SIZE +
+                iter *
+                    TILE_SIZE +
                 j;
 
             float combined_scale =
                 token_scaler *
                 scale_wo[weight_idx];
 
-            float proj_val =
+            float proj_mul =
                 static_cast<float>(
                     final_acc
                 ) *
-                combined_scale +
+                combined_scale;
+
+            float proj_val =
+                proj_mul +
                 BRAM_bo[weight_idx];
 
             int res_start_bit =
@@ -801,7 +895,8 @@ void compute_output_proj_and_residual(
                     out_chunk.range(
                         out_end,
                         out_start
-                    ) = out_converter.i;
+                    ) =
+                        out_converter.i;
                 }
 
                 FIFO_Final_Out.write(
@@ -835,8 +930,8 @@ void load_wo_residual_sequential(
 }
 
 void process_o_proj_single_tile_dataflow(
-    uint512_dt URAM_Attention_Q[
-        OPROJ_ATTENTION_TOTAL_WORDS
+    oproj_int8_vec_t URAM_Attention_Q[
+        OPROJ_REDUCED_ATTENTION_TOTAL_WORDS
     ],
     const uint512_dt *HBM_Wo,
     const uint512_dt *HBM_X_Res,
@@ -859,9 +954,9 @@ void process_o_proj_single_tile_dataflow(
         FIFO_Final_Out("FIFO_Final_Out");
 
 #ifdef __SYNTHESIS__
-    #pragma HLS STREAM variable=FIFO_Wo depth=32
-    #pragma HLS STREAM variable=FIFO_Res depth=32
-    #pragma HLS STREAM variable=FIFO_Final_Out depth=32
+    #pragma HLS STREAM variable=FIFO_Wo depth=16
+    #pragma HLS STREAM variable=FIFO_Res depth=16
+    #pragma HLS STREAM variable=FIFO_Final_Out depth=16
 #endif
 
     #pragma HLS stable variable=URAM_Attention_Q
@@ -910,11 +1005,13 @@ void run_full_output_projection(
     float SRAM_scale_wo[EMBED_DIM];
     float SRAM_Attention_Max[SEQ_LEN];
 
+    // The post-processing loop reads one element per iteration. Eight banks
+    // are unnecessary after reducing the post-processing parallelism.
     #pragma HLS ARRAY_PARTITION variable=SRAM_bo \
-        type=cyclic factor=8 dim=1
+        type=cyclic factor=2 dim=1
 
     #pragma HLS ARRAY_PARTITION variable=SRAM_scale_wo \
-        type=cyclic factor=8 dim=1
+        type=cyclic factor=2 dim=1
 
     #pragma HLS BIND_STORAGE variable=SRAM_bo \
         type=ram_2p impl=bram
@@ -923,23 +1020,23 @@ void run_full_output_projection(
         type=ram_2p impl=bram
 
     #pragma HLS BIND_STORAGE variable=SRAM_Attention_Max \
-        type=ram_2p impl=bram
+        type=ram_1p impl=bram
 
     float quant_scale[SEQ_LEN];
     float out_scaler[SEQ_LEN];
 
     #pragma HLS BIND_STORAGE variable=quant_scale \
-        type=ram_2p impl=bram
+        type=ram_1p impl=bram
 
     #pragma HLS BIND_STORAGE variable=out_scaler \
-        type=ram_2p impl=bram
+        type=ram_1p impl=bram
 
-    static uint512_dt URAM_Attention_Q[
-        OPROJ_ATTENTION_TOTAL_WORDS
+    static oproj_int8_vec_t URAM_Attention_Q[
+        OPROJ_REDUCED_ATTENTION_TOTAL_WORDS
     ];
 
     #pragma HLS BIND_STORAGE variable=URAM_Attention_Q \
-        type=ram_2p impl=uram
+        type=ram_1p impl=uram
 
     load_Bias_HBM2BRAM(
         HBM_bo,
