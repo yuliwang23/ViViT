@@ -1,20 +1,14 @@
 #include "mha_output_projection.h"
-// version: 20260725
-
-//========================================
-//============INPUT=======================
-// uint512_dt *HBM_Attention_Out,
-// float *HBM_Attention_Max,
-// uint512_dt *Wo,
-// uint512_dt *x,
-// float *bo,
-// float *scale_wo,
-//============OUTPUT======================
-// uint512_dt *out
-//========================================
+// version: 20260726_timing_fix_no_bundle_split
 
 #ifndef OPROJ_REDUCED_OUTPUT_ENGINES
 #define OPROJ_REDUCED_OUTPUT_ENGINES 2
+#endif
+
+// Force the 8-bit multipliers in the dot-product engines onto DSP blocks.
+// Set to 0 if DSP usage is more important than LUT congestion/timing.
+#ifndef OPROJ_FORCE_INT8_DSP
+#define OPROJ_FORCE_INT8_DSP 1
 #endif
 
 static constexpr int OPROJ_REDUCED_MAC_LANES = 32;
@@ -31,6 +25,13 @@ static constexpr int OPROJ_REDUCED_ATTENTION_TOTAL_WORDS =
     SEQ_LEN * OPROJ_REDUCED_WORDS_PER_ROW;
 
 typedef ap_uint<OPROJ_REDUCED_VEC_BITS> oproj_int8_vec_t;
+
+static constexpr int OPROJ_OUTPUT_STREAMS = 4;
+static constexpr int OPROJ_OUTPUT_STREAM_BITS = 128;
+static constexpr int OPROJ_FP32_PER_OUTPUT_STREAM =
+    OPROJ_OUTPUT_STREAM_BITS / 32;
+
+typedef ap_uint<OPROJ_OUTPUT_STREAM_BITS> oproj_output_stream_t;
 
 static_assert(
     EMBED_DIM % OPROJ_REDUCED_MAC_LANES == 0,
@@ -53,6 +54,17 @@ static_assert(
     "This implementation supports one or two output engines"
 );
 
+static_assert(
+    OPROJ_OUTPUT_STREAMS * OPROJ_OUTPUT_STREAM_BITS == 512,
+    "Output streams must reconstruct one 512-bit AXI word"
+);
+
+static_assert(
+    OPROJ_OUTPUT_STREAMS * OPROJ_FP32_PER_OUTPUT_STREAM ==
+        FP32_PER_512,
+    "Output stream packing does not match FP32_PER_512"
+);
+
 void run_full_output_projection(
     const uint512_dt *HBM_Attention_Out,
     const float *HBM_Attention_Max,
@@ -62,18 +74,6 @@ void run_full_output_projection(
     const float *HBM_bo,
     const float *HBM_scale_wo
 );
-
-//========================================
-//============INPUT=======================
-// uint512_dt *HBM_Attention_Out,
-// float *HBM_Attention_Max,
-// uint512_dt *Wo,
-// uint512_dt *x,
-// float *bo,
-// float *scale_wo,
-//============OUTPUT======================
-// uint512_dt *out
-//========================================
 
 extern "C" {
 
@@ -92,16 +92,16 @@ void mha_output_projection(
         bundle=gmem_mha_output_projection \
         depth=9456 \
         max_widen_bitwidth=512 \
-        max_read_burst_length=64 \
-        num_read_outstanding=16
+        max_read_burst_length=16 \
+        num_read_outstanding=2
 
     #pragma HLS INTERFACE m_axi \
         port=HBM_Attention_Max \
         offset=slave \
         bundle=gmem_mha_output_projection \
         depth=197 \
-        max_read_burst_length=64 \
-        num_read_outstanding=16
+        max_read_burst_length=16 \
+        num_read_outstanding=2
 
     #pragma HLS INTERFACE m_axi \
         port=Wo \
@@ -109,8 +109,8 @@ void mha_output_projection(
         bundle=gmem_mha_output_projection \
         depth=9216 \
         max_widen_bitwidth=512 \
-        max_read_burst_length=64 \
-        num_read_outstanding=16
+        max_read_burst_length=16 \
+        num_read_outstanding=2
 
     #pragma HLS INTERFACE m_axi \
         port=x \
@@ -118,8 +118,8 @@ void mha_output_projection(
         bundle=gmem_mha_output_projection \
         depth=9456 \
         max_widen_bitwidth=512 \
-        max_read_burst_length=64 \
-        num_read_outstanding=16
+        max_read_burst_length=16 \
+        num_read_outstanding=2
 
     #pragma HLS INTERFACE m_axi \
         port=bo \
@@ -127,8 +127,8 @@ void mha_output_projection(
         bundle=gmem_mha_output_projection \
         depth=768 \
         max_widen_bitwidth=512 \
-        max_read_burst_length=64 \
-        num_read_outstanding=16
+        max_read_burst_length=16 \
+        num_read_outstanding=2
 
     #pragma HLS INTERFACE m_axi \
         port=scale_wo \
@@ -136,8 +136,8 @@ void mha_output_projection(
         bundle=gmem_mha_output_projection \
         depth=768 \
         max_widen_bitwidth=512 \
-        max_read_burst_length=64 \
-        num_read_outstanding=16
+        max_read_burst_length=16 \
+        num_read_outstanding=2
 
     #pragma HLS INTERFACE m_axi \
         port=out \
@@ -145,8 +145,8 @@ void mha_output_projection(
         bundle=gmem_mha_output_projection \
         depth=9456 \
         max_widen_bitwidth=512 \
-        max_write_burst_length=64 \
-        num_write_outstanding=16
+        max_write_burst_length=16 \
+        num_write_outstanding=2
 
     #pragma HLS INTERFACE s_axilite port=HBM_Attention_Out bundle=control
     #pragma HLS INTERFACE s_axilite port=HBM_Attention_Max bundle=control
@@ -174,7 +174,9 @@ void load_Bias_HBM2BRAM(
     const float *HBM_b,
     float BRAM_b[EMBED_DIM]
 ) {
-    #pragma HLS INLINE off
+    // Inlined to remove a child-module handshake and parent-level
+    // BRAM ownership multiplexer.
+    #pragma HLS INLINE
 
     load_b_loop:
     for (int i = 0; i < EMBED_DIM; i++) {
@@ -188,7 +190,9 @@ void load_attention_max_HBM2BRAM(
     const float *HBM_Attention_Max,
     float BRAM_Attention_Max[SEQ_LEN]
 ) {
-    #pragma HLS INLINE off
+    // Inlined to remove a child-module handshake and parent-level
+    // BRAM ownership multiplexer.
+    #pragma HLS INLINE
 
     load_attention_max_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
@@ -204,12 +208,11 @@ void prepare_attention_quant_params(
     float quant_scale[SEQ_LEN],
     float out_scaler[SEQ_LEN]
 ) {
-    #pragma HLS INLINE off
+    // Inlined because it is a small sequential initialization stage.
+    #pragma HLS INLINE
 
     prepare_scale_loop:
     for (int i = 0; i < SEQ_LEN; i++) {
-        // This loop is not performance-critical. A larger II reduces pressure
-        // from the floating-point divider and improves timing closure.
         #pragma HLS PIPELINE II=4
 
         float max_val =
@@ -247,8 +250,6 @@ static int8_dt quantize_fp32_to_int8_reduced(
             )
         );
 
-    // Equivalent rounding direction to std::round for the clamped range,
-    // while avoiding a standalone round operator.
     float rounded_val =
         (clamped_val >= 0.0f)
             ? (clamped_val + 0.5f)
@@ -323,8 +324,6 @@ void load_quantize_attention_HBM2URAM(
                     lane < FP32_PER_512;
                     lane++
                 ) {
-                    // One FP32 quantization lane per cycle.
-                    // The original code generated eight parallel lanes.
                     #pragma HLS PIPELINE II=1
 
                     int fp32_start =
@@ -469,10 +468,15 @@ void load_Residual_Tile_HBM2FIFO(
 }
 
 void store_Final_Tile_FIFO2HBM(
-    hls::stream<uint512_dt> &FIFO_Final_Out,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_0,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_1,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_2,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_3,
     uint512_dt *HBM_Out,
     int iter
 ) {
+    #pragma HLS INLINE off
+
     int tile_col_offset =
         iter *
         FP32_WORDS_PER_TILE;
@@ -491,15 +495,61 @@ void store_Final_Tile_FIFO2HBM(
         ) {
             #pragma HLS PIPELINE II=1
 
+            oproj_output_stream_t output_slice_0 =
+                FIFO_Final_Out_0.read();
+
+            oproj_output_stream_t output_slice_1 =
+                FIFO_Final_Out_1.read();
+
+            oproj_output_stream_t output_slice_2 =
+                FIFO_Final_Out_2.read();
+
+            oproj_output_stream_t output_slice_3 =
+                FIFO_Final_Out_3.read();
+
+            uint512_dt output_word =
+                0;
+
+            output_word.range(127, 0) =
+                output_slice_0;
+
+            output_word.range(255, 128) =
+                output_slice_1;
+
+            output_word.range(383, 256) =
+                output_slice_2;
+
+            output_word.range(511, 384) =
+                output_slice_3;
+
             int target_idx =
                 row_start +
                 tile_col_offset +
                 j;
 
             HBM_Out[target_idx] =
-                FIFO_Final_Out.read();
+                output_word;
         }
     }
+}
+
+static ap_int<16> multiply_int8_timing(
+    int8_dt input_val,
+    int8_dt weight_val
+) {
+    #pragma HLS INLINE
+
+    ap_int<16> result =
+        input_val *
+        weight_val;
+
+#if OPROJ_FORCE_INT8_DSP
+    // A one-stage DSP multiply reduces LUT congestion without changing
+    // the number of MAC lanes or the requested outer-loop II.
+    #pragma HLS BIND_OP variable=result op=mul impl=dsp latency=1
+#endif
+
+    return result;
 }
 
 static int32_dt dot_product_32_int8(
@@ -562,8 +612,10 @@ static int32_dt dot_product_32_int8(
             );
 
         product[idx] =
-            input_val *
-            weight_val;
+            multiply_int8_timing(
+                input_val,
+                weight_val
+            );
     }
 
     reduce_level_1:
@@ -618,7 +670,10 @@ void compute_output_proj_and_residual(
     ],
     hls::stream<uint512_dt> &FIFO_Wo,
     hls::stream<uint512_dt> &FIFO_Res,
-    hls::stream<uint512_dt> &FIFO_Final_Out,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_0,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_1,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_2,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_3,
     float out_scaler[SEQ_LEN],
     float BRAM_bo[EMBED_DIM],
     float scale_wo[EMBED_DIM],
@@ -636,8 +691,6 @@ void compute_output_proj_and_residual(
         [OPROJ_REDUCED_WORDS_PER_ROW];
 #endif
 
-    // The output-channel dimension is banked so the two 32-MAC engines can
-    // read two independent weight rows in the same cycle.
     #pragma HLS ARRAY_PARTITION variable=URAM_Wo \
         type=cyclic factor=OPROJ_REDUCED_OUTPUT_ENGINES dim=1
 
@@ -657,9 +710,6 @@ void compute_output_proj_and_residual(
                 HBM_WEIGHT_WORDS_PER_ROW;
             hbm_word_idx++
         ) {
-            // A 512-bit HBM word is converted into two 256-bit URAM words.
-            // II=2 intentionally avoids requiring two wide URAM writes in
-            // the same clock cycle.
             #pragma HLS PIPELINE II=2
 
             uint512_dt packed_weight =
@@ -736,12 +786,6 @@ void compute_output_proj_and_residual(
                     OPROJ_REDUCED_WORDS_PER_ROW;
                 step++
             ) {
-                // Each engine performs 32 INT8 MAC/cycle. With the default
-                // two engines, the total is 64 INT8 MAC/cycle, compared with
-                // 128 INT8 MAC/cycle in the original implementation.
-                //
-                // The critical reduction tree of each engine decreases from
-                // seven levels to five levels.
                 #pragma HLS PIPELINE II=1
 
                 oproj_int8_vec_t input_word =
@@ -804,9 +848,6 @@ void compute_output_proj_and_residual(
 
         post_process_loop:
         for (int j = 0; j < TILE_SIZE; j++) {
-            // Relaxing II from 1 to 2 allows the floating-point multiply/add
-            // chain to be scheduled across more cycles and reduces pressure
-            // on DSP sharing and timing closure.
             #pragma HLS PIPELINE II=2
 
             int pack_lane =
@@ -867,8 +908,25 @@ void compute_output_proj_and_residual(
                 pack_lane ==
                 FP32_PER_512 - 1
             ) {
-                uint512_dt out_chunk =
-                    0;
+                oproj_output_stream_t output_slice[
+                    OPROJ_OUTPUT_STREAMS
+                ];
+
+                #pragma HLS ARRAY_PARTITION \
+                    variable=output_slice \
+                    type=complete dim=1
+
+                initialize_output_slice_loop:
+                for (
+                    int stream_idx = 0;
+                    stream_idx < OPROJ_OUTPUT_STREAMS;
+                    stream_idx++
+                ) {
+                    #pragma HLS UNROLL
+
+                    output_slice[stream_idx] =
+                        0;
+                }
 
                 pack_write_loop:
                 for (
@@ -886,21 +944,43 @@ void compute_output_proj_and_residual(
                     out_converter.f =
                         pack_array[lane];
 
+                    int stream_idx =
+                        lane /
+                        OPROJ_FP32_PER_OUTPUT_STREAM;
+
+                    int stream_lane =
+                        lane %
+                        OPROJ_FP32_PER_OUTPUT_STREAM;
+
                     int out_start =
-                        lane * 32;
+                        stream_lane * 32;
 
                     int out_end =
                         out_start + 31;
 
-                    out_chunk.range(
+                    output_slice[
+                        stream_idx
+                    ].range(
                         out_end,
                         out_start
                     ) =
                         out_converter.i;
                 }
 
-                FIFO_Final_Out.write(
-                    out_chunk
+                FIFO_Final_Out_0.write(
+                    output_slice[0]
+                );
+
+                FIFO_Final_Out_1.write(
+                    output_slice[1]
+                );
+
+                FIFO_Final_Out_2.write(
+                    output_slice[2]
+                );
+
+                FIFO_Final_Out_3.write(
+                    output_slice[3]
                 );
             }
         }
@@ -929,7 +1009,101 @@ void load_wo_residual_sequential(
     );
 }
 
-void process_o_proj_single_tile_dataflow(
+void load_all_tiles_wo_residual_sequential(
+    const uint512_dt *HBM_Wo,
+    const uint512_dt *HBM_X_Res,
+    hls::stream<uint512_dt> &FIFO_Wo,
+    hls::stream<uint512_dt> &FIFO_Res
+) {
+    #pragma HLS INLINE off
+
+    constexpr int NUM_TILES =
+        EMBED_DIM /
+        TILE_SIZE;
+
+    load_all_tiles_loop:
+    for (int iter = 0; iter < NUM_TILES; iter++) {
+        #pragma HLS LOOP_FLATTEN off
+
+        load_wo_residual_sequential(
+            HBM_Wo,
+            HBM_X_Res,
+            FIFO_Wo,
+            FIFO_Res,
+            iter
+        );
+    }
+}
+
+void compute_all_tiles_output_proj_and_residual(
+    oproj_int8_vec_t URAM_Attention_Q[
+        OPROJ_REDUCED_ATTENTION_TOTAL_WORDS
+    ],
+    hls::stream<uint512_dt> &FIFO_Wo,
+    hls::stream<uint512_dt> &FIFO_Res,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_0,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_1,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_2,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_3,
+    float out_scaler[SEQ_LEN],
+    float BRAM_bo[EMBED_DIM],
+    float scale_wo[EMBED_DIM]
+) {
+    #pragma HLS INLINE off
+
+    constexpr int NUM_TILES =
+        EMBED_DIM /
+        TILE_SIZE;
+
+    compute_all_tiles_loop:
+    for (int iter = 0; iter < NUM_TILES; iter++) {
+        #pragma HLS LOOP_FLATTEN off
+
+        compute_output_proj_and_residual(
+            URAM_Attention_Q,
+            FIFO_Wo,
+            FIFO_Res,
+            FIFO_Final_Out_0,
+            FIFO_Final_Out_1,
+            FIFO_Final_Out_2,
+            FIFO_Final_Out_3,
+            out_scaler,
+            BRAM_bo,
+            scale_wo,
+            iter
+        );
+    }
+}
+
+void store_all_tiles_Final_FIFO2HBM(
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_0,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_1,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_2,
+    hls::stream<oproj_output_stream_t> &FIFO_Final_Out_3,
+    uint512_dt *HBM_Out
+) {
+    #pragma HLS INLINE off
+
+    constexpr int NUM_TILES =
+        EMBED_DIM /
+        TILE_SIZE;
+
+    store_all_tiles_loop:
+    for (int iter = 0; iter < NUM_TILES; iter++) {
+        #pragma HLS LOOP_FLATTEN off
+
+        store_Final_Tile_FIFO2HBM(
+            FIFO_Final_Out_0,
+            FIFO_Final_Out_1,
+            FIFO_Final_Out_2,
+            FIFO_Final_Out_3,
+            HBM_Out,
+            iter
+        );
+    }
+}
+
+void process_all_tiles_persistent_dataflow(
     oproj_int8_vec_t URAM_Attention_Q[
         OPROJ_REDUCED_ATTENTION_TOTAL_WORDS
     ],
@@ -938,25 +1112,53 @@ void process_o_proj_single_tile_dataflow(
     uint512_dt *HBM_Out,
     float out_scaler[SEQ_LEN],
     float BRAM_bo[EMBED_DIM],
-    float scale_wo[EMBED_DIM],
-    int iter
+    float scale_wo[EMBED_DIM]
 ) {
     #pragma HLS DATAFLOW
     #pragma HLS INLINE off
 
     hls::stream<uint512_dt>
-        FIFO_Wo("FIFO_Wo");
+        FIFO_Wo("FIFO_Wo_all_tiles");
 
     hls::stream<uint512_dt>
-        FIFO_Res("FIFO_Res");
+        FIFO_Res("FIFO_Res_all_tiles");
 
-    hls::stream<uint512_dt>
-        FIFO_Final_Out("FIFO_Final_Out");
+    hls::stream<oproj_output_stream_t>
+        FIFO_Final_Out_0("FIFO_Final_Out_0_all_tiles");
+
+    hls::stream<oproj_output_stream_t>
+        FIFO_Final_Out_1("FIFO_Final_Out_1_all_tiles");
+
+    hls::stream<oproj_output_stream_t>
+        FIFO_Final_Out_2("FIFO_Final_Out_2_all_tiles");
+
+    hls::stream<oproj_output_stream_t>
+        FIFO_Final_Out_3("FIFO_Final_Out_3_all_tiles");
 
 #ifdef __SYNTHESIS__
-    #pragma HLS STREAM variable=FIFO_Wo depth=16
-    #pragma HLS STREAM variable=FIFO_Res depth=16
-    #pragma HLS STREAM variable=FIFO_Final_Out depth=16
+    #pragma HLS STREAM variable=FIFO_Wo depth=32
+    #pragma HLS BIND_STORAGE variable=FIFO_Wo \
+        type=fifo impl=bram
+
+    #pragma HLS STREAM variable=FIFO_Res depth=32
+    #pragma HLS BIND_STORAGE variable=FIFO_Res \
+        type=fifo impl=bram
+
+    #pragma HLS STREAM variable=FIFO_Final_Out_0 depth=4
+    #pragma HLS BIND_STORAGE variable=FIFO_Final_Out_0 \
+        type=fifo impl=bram
+
+    #pragma HLS STREAM variable=FIFO_Final_Out_1 depth=4
+    #pragma HLS BIND_STORAGE variable=FIFO_Final_Out_1 \
+        type=fifo impl=bram
+
+    #pragma HLS STREAM variable=FIFO_Final_Out_2 depth=4
+    #pragma HLS BIND_STORAGE variable=FIFO_Final_Out_2 \
+        type=fifo impl=bram
+
+    #pragma HLS STREAM variable=FIFO_Final_Out_3 depth=4
+    #pragma HLS BIND_STORAGE variable=FIFO_Final_Out_3 \
+        type=fifo impl=bram
 #endif
 
     #pragma HLS stable variable=URAM_Attention_Q
@@ -964,29 +1166,32 @@ void process_o_proj_single_tile_dataflow(
     #pragma HLS stable variable=BRAM_bo
     #pragma HLS stable variable=scale_wo
 
-    load_wo_residual_sequential(
+    load_all_tiles_wo_residual_sequential(
         HBM_Wo,
         HBM_X_Res,
         FIFO_Wo,
-        FIFO_Res,
-        iter
+        FIFO_Res
     );
 
-    compute_output_proj_and_residual(
+    compute_all_tiles_output_proj_and_residual(
         URAM_Attention_Q,
         FIFO_Wo,
         FIFO_Res,
-        FIFO_Final_Out,
+        FIFO_Final_Out_0,
+        FIFO_Final_Out_1,
+        FIFO_Final_Out_2,
+        FIFO_Final_Out_3,
         out_scaler,
         BRAM_bo,
-        scale_wo,
-        iter
+        scale_wo
     );
 
-    store_Final_Tile_FIFO2HBM(
-        FIFO_Final_Out,
-        HBM_Out,
-        iter
+    store_all_tiles_Final_FIFO2HBM(
+        FIFO_Final_Out_0,
+        FIFO_Final_Out_1,
+        FIFO_Final_Out_2,
+        FIFO_Final_Out_3,
+        HBM_Out
     );
 }
 
@@ -1005,8 +1210,6 @@ void run_full_output_projection(
     float SRAM_scale_wo[EMBED_DIM];
     float SRAM_Attention_Max[SEQ_LEN];
 
-    // The post-processing loop reads one element per iteration. Eight banks
-    // are unnecessary after reducing the post-processing parallelism.
     #pragma HLS ARRAY_PARTITION variable=SRAM_bo \
         type=cyclic factor=2 dim=1
 
@@ -1035,8 +1238,10 @@ void run_full_output_projection(
         OPROJ_REDUCED_ATTENTION_TOTAL_WORDS
     ];
 
+    // Dual-port URAM separates the initialization writer from the
+    // output-projection reader and reduces parent-level port multiplexing.
     #pragma HLS BIND_STORAGE variable=URAM_Attention_Q \
-        type=ram_1p impl=uram
+        type=ram_2p impl=uram
 
     load_Bias_HBM2BRAM(
         HBM_bo,
@@ -1065,21 +1270,13 @@ void run_full_output_projection(
         URAM_Attention_Q
     );
 
-    constexpr int NUM_TILES =
-        EMBED_DIM /
-        TILE_SIZE;
-
-    full_proj_loop:
-    for (int iter = 0; iter < NUM_TILES; iter++) {
-        process_o_proj_single_tile_dataflow(
-            URAM_Attention_Q,
-            HBM_Wo,
-            HBM_X_Res,
-            HBM_Out,
-            out_scaler,
-            SRAM_bo,
-            SRAM_scale_wo,
-            iter
-        );
-    }
+    process_all_tiles_persistent_dataflow(
+        URAM_Attention_Q,
+        HBM_Wo,
+        HBM_X_Res,
+        HBM_Out,
+        out_scaler,
+        SRAM_bo,
+        SRAM_scale_wo
+    );
 }

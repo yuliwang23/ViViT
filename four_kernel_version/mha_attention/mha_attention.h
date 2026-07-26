@@ -59,7 +59,7 @@ constexpr int INT8_PER_512 = 64;
 constexpr int INT64_PER_512 = 8;
 
 constexpr int QKV_INPUT_PARALLEL =
-    96;
+    64;
 
 constexpr int QKV_PACKS_PER_STEP =
     QKV_INPUT_PARALLEL / INT8_PACK;
@@ -157,13 +157,13 @@ static_assert(
 );
 
 static_assert(
-    QKV_PACKS_PER_STEP == 12,
-    "Current QKV implementation requires 12 packages per step"
+    QKV_PACKS_PER_STEP == 8,
+    "Current QKV implementation requires 8 packages per step"
 );
 
 static_assert(
-    QKV_MEMORY_BANKS == 6,
-    "Current QKV implementation requires 6 memory banks"
+    QKV_MEMORY_BANKS == 4,
+    "Current QKV implementation requires 4 memory banks"
 );
 
 static_assert(
