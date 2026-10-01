@@ -17,8 +17,8 @@
 #include <iostream>
 #include <string>
 
-#include "help_functions.h"
-#include "FFN2.h"
+#include "../../host/help_functions.h"
+#include "../../hw/ffn2/ffn2.h"
 
 using namespace std;
 

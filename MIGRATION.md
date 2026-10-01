@@ -37,11 +37,34 @@ The active host's existing absolute model/batch-input paths are preserved becaus
 
 ## Content/path edits
 
-No content edits have been applied at this record commit. The final path-correction commit will replace this paragraph with the exact file, line, old text and new text for every authorized edit. Algorithm and header repairs are excluded.
+Only the changes below were made to existing imported/selected source and editor files after relocation. Line numbers are unchanged because every edit replaces exactly one line. Documentation additions/updates are listed separately.
+
+| File | Line | Old | New |
+|---|---|---|---|
+| `hw/ffn1/ffn1.cpp` | 1 | `#include "FFN1.h"` | `#include "ffn1.h"` |
+| `hw/ffn2/ffn2.cpp` | 1 | `#include "FFN2.h"` | `#include "ffn2.h"` |
+| `tb/mha_attention/host.cpp` | 20 | `#include "help_functions.h"` | `#include "../../host/help_functions.h"` |
+| `tb/mha_attention/host.cpp` | 21 | `#include "mha_attention.h"` | `#include "../../hw/mha_attention/mha_attention.h"` |
+| `tb/mha_output_projection/host.cpp` | 20 | `#include "help_functions.h"` | `#include "../../host/help_functions.h"` |
+| `tb/mha_output_projection/host.cpp` | 21 | `#include "mha_output_projection.h"` | `#include "../../hw/mha_output_projection/mha_output_projection.h"` |
+| `tb/ffn1/host.cpp` | 20 | `#include "help_functions.h"` | `#include "../../host/help_functions.h"` |
+| `tb/ffn1/host.cpp` | 21 | `#include "FFN1.h"` | `#include "../../hw/ffn1/ffn1.h"` |
+| `tb/ffn2/host.cpp` | 20 | `#include "help_functions.h"` | `#include "../../host/help_functions.h"` |
+| `tb/ffn2/host.cpp` | 21 | `#include "FFN2.h"` | `#include "../../hw/ffn2/ffn2.h"` |
+| `.vscode/launch.json` | 11 | `"cwd": "c:/Users/janet/Desktop/ViViT/ViViT_vitis/ViViT/spatial_encoder",` | `"cwd": "${workspaceFolder}/host",` |
+| `.vscode/launch.json` | 12 | `"program": "c:/Users/janet/Desktop/ViViT/ViViT_vitis/ViViT/spatial_encoder/build/Debug/outDebug",` | `"program": "${workspaceFolder}/host/build/Debug/outDebug",` |
+
+No host runtime input/parameter paths, exported kernel symbols, CU names, argument order, SLR assignments or HBM indices were changed. FFN source/header filenames alone were lowercased. The root README was filled from its blank main version; archive READMEs and this migration record are newly authored documentation.
 
 ## Static verification
 
-Final checks are pending until moves and path corrections are complete. This is not a compile, synthesis or hardware validation claim.
+Completed source/host/config checks: 24 CUs, 216 mapped ports, argument counts 14/7/8/7, matching bank arrays and two pipelines per SLR. All 22 active quoted includes resolve with exact path spelling. No case-insensitive path collisions.
+
+Final file accounting: 841 original filesystem files + 12 imported/preserved kernel snapshot files + 1 MIGRATION.md + 44 new archive READMEs = 898 files (excluding .git). Root README existed and was updated, not counted as a new file. All 575 params files remain in place and byte-identical. All original archived files are byte-identical, including main-v0 kernel sources. The ignored executable follows its original module without becoming tracked; the local untracked host's bytes/path are unchanged. Old branch tips and both source tags are unchanged.
+
+Archived quoted includes with no local resolution: 60. They are reported as historical limitations, not repaired or treated as active dependencies. External HLS/OpenCL/system headers are not supplied by this repository. No compiler, C-simulation, co-simulation, synthesis, FPGA run or accuracy evaluation was executed.
+
+12 necessary include/editor-path occurrences were changed; the table above enumerates each. Known header issues remain unchanged. Run and ViViT_Output semantics remain TODO.
 
 ## Complete source-to-destination map
 

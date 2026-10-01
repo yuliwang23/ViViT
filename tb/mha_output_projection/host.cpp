@@ -17,8 +17,8 @@
 #include <iostream>
 #include <string>
 
-#include "help_functions.h"
-#include "mha_output_projection.h"
+#include "../../host/help_functions.h"
+#include "../../hw/mha_output_projection/mha_output_projection.h"
 
 using namespace std;
 

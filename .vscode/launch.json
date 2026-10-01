@@ -8,8 +8,8 @@
       "args": [],
       "stopAtEntry": false,
       "externalConsole": true,
-      "cwd": "c:/Users/janet/Desktop/ViViT/ViViT_vitis/ViViT/spatial_encoder",
-      "program": "c:/Users/janet/Desktop/ViViT/ViViT_vitis/ViViT/spatial_encoder/build/Debug/outDebug",
+      "cwd": "${workspaceFolder}/host",
+      "program": "${workspaceFolder}/host/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

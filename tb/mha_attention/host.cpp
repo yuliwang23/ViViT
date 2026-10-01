@@ -17,8 +17,8 @@
 #include <iostream>
 #include <string>
 
-#include "help_functions.h"
-#include "mha_attention.h"
+#include "../../host/help_functions.h"
+#include "../../hw/mha_attention/mha_attention.h"
 
 using namespace std;
 
