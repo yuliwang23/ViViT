@@ -4,7 +4,7 @@ FPGA Spatial Encoder acceleration for ViViT Factorised Encoder, with CPU tempora
 
 ## Selected implementation
 
-The final six-instance host and link configuration come from main `5504ce4` (`paper-submission-main`). Hardware kernels come from Decrease_params `eff3f5e` (`paper-submission-kernels`). The main four-kernel v0 snapshot is preserved in archive. See [MIGRATION.md](MIGRATION.md) for source revisions and the path map.
+The accelerator uses six pipeline instances, each composed of the four kernels below. The host application is in `host/`, and the U280 link configuration is in `configs/`.
 
 | Paper term | Kernel symbol | Source |
 |---|---|---|
@@ -27,7 +27,7 @@ host/        final host, CPU temporal encoder and support code
 configs/     six-instance U280 link/SLR/HBM configuration
 tb/          four standalone single-kernel OpenCL harnesses
 params/      runtime parameters and tensor fixtures
-archive/     main kernel v0, historical hosts and earlier experiments
+archive/     historical implementations and experiments
 MIGRATION.md source revisions, complete path map and exact content edits
 ```
 
