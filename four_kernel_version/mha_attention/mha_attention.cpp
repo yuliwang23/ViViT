@@ -196,7 +196,7 @@ void mha_attention(
     float scaler_X[SEQ_LEN];
 
     #pragma HLS ARRAY_PARTITION variable=X_package \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS BIND_STORAGE variable=X_package \
         type=ram_2p impl=uram
@@ -439,7 +439,7 @@ void compute_mean_variance(
         type=cyclic factor=8
 
     #pragma HLS ARRAY_PARTITION variable=X_package_array \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     float norm_buffer[EMBED_DIM];
 
@@ -632,7 +632,7 @@ void layernorm_compute(
         type=cyclic factor=8
 
     #pragma HLS ARRAY_PARTITION variable=X_package \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS BIND_STORAGE variable=SRAM_gamma \
         type=ram_2p impl=bram
@@ -703,13 +703,13 @@ void load_All_Weights_Parallel(
     #pragma HLS INLINE off
 
     #pragma HLS ARRAY_PARTITION variable=URAM_Wq \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS ARRAY_PARTITION variable=URAM_Wk \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS ARRAY_PARTITION variable=URAM_Wv \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS BIND_STORAGE variable=URAM_Wq \
         type=ram_t2p impl=uram
@@ -774,7 +774,7 @@ void load_All_Weights_Parallel(
     }
 }
 
-static int28_dt dot_product_96_int8(
+static int28_dt dot_product_64_int8(
     int64_dt input_packages[
         QKV_PACKS_PER_STEP
     ],
@@ -790,13 +790,13 @@ static int28_dt dot_product_96_int8(
     #pragma HLS ARRAY_PARTITION variable=weight_packages \
         type=complete
 
-    int16_dt product[96];
+    int16_dt product[64];
 
-    ap_int<17> level_1[48];
-    ap_int<18> level_2[24];
-    ap_int<19> level_3[12];
-    ap_int<20> level_4[6];
-    ap_int<21> level_5[3];
+    ap_int<17> level_1[32];
+    ap_int<18> level_2[16];
+    ap_int<19> level_3[8];
+    ap_int<20> level_4[4];
+    ap_int<21> level_5[2];
 
     #pragma HLS ARRAY_PARTITION variable=product \
         type=complete
@@ -851,7 +851,7 @@ static int28_dt dot_product_96_int8(
     }
 
     reduce_level_1:
-    for (int i = 0; i < 48; i++) {
+    for (int i = 0; i < 32; i++) {
         #pragma HLS UNROLL
 
         level_1[i] =
@@ -860,7 +860,7 @@ static int28_dt dot_product_96_int8(
     }
 
     reduce_level_2:
-    for (int i = 0; i < 24; i++) {
+    for (int i = 0; i < 16; i++) {
         #pragma HLS UNROLL
 
         level_2[i] =
@@ -869,7 +869,7 @@ static int28_dt dot_product_96_int8(
     }
 
     reduce_level_3:
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 8; i++) {
         #pragma HLS UNROLL
 
         level_3[i] =
@@ -878,7 +878,7 @@ static int28_dt dot_product_96_int8(
     }
 
     reduce_level_4:
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 4; i++) {
         #pragma HLS UNROLL
 
         level_4[i] =
@@ -887,7 +887,7 @@ static int28_dt dot_product_96_int8(
     }
 
     reduce_level_5:
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
         #pragma HLS UNROLL
 
         level_5[i] =
@@ -899,14 +899,7 @@ static int28_dt dot_product_96_int8(
         level_5[0]
         + level_5[1];
 
-    ap_int<22> partial_1 =
-        level_5[2];
-
-    ap_int<23> total =
-        partial_0
-        + partial_1;
-
-    return (int28_dt)total;
+    return (int28_dt)partial_0;
 }
 
 void compute_linear_qkv_one_head(
@@ -931,7 +924,7 @@ void compute_linear_qkv_one_head(
     #pragma HLS INLINE off
 
     #pragma HLS ARRAY_PARTITION variable=X_package \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS BIND_STORAGE variable=X_package \
         type=ram_2p impl=uram
@@ -963,13 +956,13 @@ void compute_linear_qkv_one_head(
 #endif
 
     #pragma HLS ARRAY_PARTITION variable=URAM_Wq \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS ARRAY_PARTITION variable=URAM_Wk \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS ARRAY_PARTITION variable=URAM_Wv \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     #pragma HLS BIND_STORAGE variable=URAM_Wq \
         type=ram_t2p impl=uram
@@ -1092,19 +1085,19 @@ void compute_linear_qkv_one_head(
             }
 
             int28_dt cycle_q =
-                dot_product_96_int8(
+                dot_product_64_int8(
                     input_packages,
                     weight_q_packages
                 );
 
             int28_dt cycle_k =
-                dot_product_96_int8(
+                dot_product_64_int8(
                     input_packages,
                     weight_k_packages
                 );
 
             int28_dt cycle_v =
-                dot_product_96_int8(
+                dot_product_64_int8(
                     input_packages,
                     weight_v_packages
                 );
@@ -2369,7 +2362,7 @@ void produce_qkv_one_head_dataflow_to_fifo(
     #pragma HLS DATAFLOW
 
     #pragma HLS ARRAY_PARTITION variable=X_package \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     hls::stream<uint512_dt>
         FIFO_Wq("FIFO_Wq_producer");
@@ -2687,7 +2680,7 @@ void process_all_heads_fifo_dataflow(
     #pragma HLS DATAFLOW
 
     #pragma HLS ARRAY_PARTITION variable=X_package \
-        type=cyclic factor=6 dim=2
+        type=cyclic factor=QKV_MEMORY_BANKS dim=2
 
     hls::stream<int64_dt>
         FIFO_Q_head("FIFO_Q_head");
