@@ -33,7 +33,7 @@ These observations were rechecked against the imported kernel revision `eff3f5e7
 - `host/help_functions.h` uses unqualified `string` in `run_custom_profiling`; the single-kernel harnesses include it before their `using namespace std`. No declaration or include-order repair is included.
 - Hardware compilation, simulation and execution have not been demonstrated by this cleanup. HLS/OpenCL/system headers require the external toolchain.
 
-The active host's existing absolute model/batch-input paths are preserved because `params/` is not relocated and the external dataset is absent. The real invocation and meaning of `ViViT_Output` remain TODO. The old conflicted link config is archived, not repaired.
+The active host's existing absolute model/batch-input paths are preserved because `params/` is not relocated and the external dataset is absent. The reviewed README records the supplied invocation and identifies ViViT_Output as external FP32 Scenic/Flax/JAX logits. The old conflicted link config is archived, not repaired.
 
 ## Content/path edits
 
@@ -51,8 +51,8 @@ Only the changes below were made to existing imported/selected source and editor
 | `tb/ffn1/host.cpp` | 21 | `#include "FFN1.h"` | `#include "../../hw/ffn1/ffn1.h"` |
 | `tb/ffn2/host.cpp` | 20 | `#include "help_functions.h"` | `#include "../../host/help_functions.h"` |
 | `tb/ffn2/host.cpp` | 21 | `#include "FFN2.h"` | `#include "../../hw/ffn2/ffn2.h"` |
-| `.vscode/launch.json` | 11 | `"cwd": "c:/Users/janet/Desktop/ViViT/ViViT_vitis/ViViT/spatial_encoder",` | `"cwd": "${workspaceFolder}/host",` |
-| `.vscode/launch.json` | 12 | `"program": "c:/Users/janet/Desktop/ViViT/ViViT_vitis/ViViT/spatial_encoder/build/Debug/outDebug",` | `"program": "${workspaceFolder}/host/build/Debug/outDebug",` |
+| `.vscode/launch.json` | 11 | `"cwd": "<original-local-checkout>/spatial_encoder",` | `"cwd": "${workspaceFolder}/host",` |
+| `.vscode/launch.json` | 12 | `"program": "<original-local-checkout>/spatial_encoder/build/Debug/outDebug",` | `"program": "${workspaceFolder}/host/build/Debug/outDebug",` |
 
 No host runtime input/parameter paths, exported kernel symbols, CU names, argument order, SLR assignments or HBM indices were changed. FFN source/header filenames alone were lowercased. The root README was filled from its blank main version; archive READMEs and this migration record are newly authored documentation.
 
@@ -925,3 +925,7 @@ Source revision disambiguates the two copies of four_kernel_version. KEEP/HOLD r
 | `5504ce464df9` | `testbench/linear_qkv_multihead/temp.cpp` | `archive/experimental/testbench/linear_qkv_multihead/temp.cpp` | git mv |
 | `5504ce464df9` | `testbench/linear_qkv_multihead/temp_stream.cpp` | `archive/experimental/testbench/linear_qkv_multihead/temp_stream.cpp` | git mv |
 | `5504ce464df9` | `testbench/softmax_test.cpp` | `archive/experimental/testbench/softmax_test.cpp` | git mv |
+
+## README review follow-up
+
+README now records the supplied paper results, tool versions, external build/run commands and FP32 reference semantics. Source inspection confirms sample-ID pairing and argument usage; MAE is computed only for argmax mismatches. No executable source was changed. Historical editor-path values above use a redacted checkout placeholder to avoid publishing local identities or absolute paths.
